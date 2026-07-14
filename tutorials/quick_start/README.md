@@ -24,7 +24,7 @@ PyPI** — install it from a clone of this repo.
 ### The four commands
 
 ```bash
-git clone <this-repo> siar
+git clone https://github.com/energy-master/siar.git
 cd siar
 
 python3.13 -m venv .venv          # a venv, so SIAR's deps do not pollute your system Python
@@ -58,7 +58,7 @@ You can also install straight from git without cloning first — though you will
 your own corpus, since the tutorial scripts live in the repo:
 
 ```bash
-pip install git+ssh://git@github.com/<owner>/siar.git
+pip install git+https://github.com/energy-master/siar.git
 ```
 
 ### Check it worked

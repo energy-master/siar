@@ -16,7 +16,7 @@ seconds".
 ## Install
 
 ```bash
-pip install git+https://github.com/<org>/siar.git
+pip install git+https://github.com/energy-master/siar.git
 ```
 
 Requires Python ≥ 3.13. Runs on CPU.
