@@ -9,28 +9,101 @@ draws.
 
 ---
 
-## 0. Install
+## 0. Install the library
 
-From a clean clone, on Linux or macOS:
+SIAR is a normal pip-installable Python package with a console script (`siar`). It is **not on
+PyPI** — install it from a clone of this repo.
+
+### Requirements
+
+- **Python ≥ 3.13.** It will not install on 3.12. Check with `python3 --version`.
+- A C compiler is *not* needed — every dependency ships prebuilt wheels.
+- CPU only. There is no GPU anywhere in the design, and everything below runs in about a minute on
+  a laptop.
+
+### The four commands
 
 ```bash
 git clone <this-repo> siar
 cd siar
 
-python3.13 -m venv .venv          # Python 3.13 or newer is required
-source .venv/bin/activate         # Windows: .venv\Scripts\activate
+python3.13 -m venv .venv          # a venv, so SIAR's deps do not pollute your system Python
+source .venv/bin/activate         # macOS/Linux   (Windows: .venv\Scripts\activate)
 
-pip install -e .                  # numpy, scipy, soundfile, torch, optuna
-siar version                      # siar 0.1.0
+pip install -e .                  # install SIAR and its dependencies
 ```
 
-CPU only, and that is deliberate — there is no GPU in the design. Everything below runs in about
-a minute on a laptop.
+That pulls **numpy, scipy, soundfile, torch and optuna** — a few hundred MB, mostly torch, so give
+it a minute on a cold cache.
 
-> **macOS.** The `pip install -e .` above is all you need: the `torch` and `soundfile` wheels are
-> prebuilt for both Apple Silicon and Intel, and `soundfile` bundles libsndfile, so there is no
-> Homebrew step. If you are on an older Python, `brew install python@3.13` first — SIAR needs
-> ≥ 3.13 and will not install on 3.12.
+If you would rather use a requirements file, these do the same thing:
+
+```bash
+pip install -r requirements.txt       # same as `pip install -e .`
+pip install -r requirements-dev.txt   # ...plus pytest, librosa and matplotlib
+```
+
+They delegate to `pyproject.toml` rather than restating the dependency list, so the two can never
+drift apart.
+
+`-e` (editable) installs it in place: the package points back at `src/`, so edits to the source are
+live and you do not have to reinstall to try a change. If you just want to *use* SIAR and never
+touch its source, drop the flag:
+
+```bash
+pip install .                     # a plain, non-editable install
+```
+
+You can also install straight from git without cloning first — though you will then have to write
+your own corpus, since the tutorial scripts live in the repo:
+
+```bash
+pip install git+ssh://git@github.com/<owner>/siar.git
+```
+
+### Check it worked
+
+```bash
+siar version                      # siar 0.1.0
+siar detectors                    # conv_ae  A fitted convolutional autoencoder.
+```
+
+If `siar version` prints, you are done — the console script is on your `PATH` and the package
+imports. **`siar: command not found` almost always means the venv is not active**; re-run
+`source .venv/bin/activate`. (You can also always invoke it as `python -m siar.cli.main`.)
+
+### Optional extras
+
+The defaults are enough for everything in this quick start. The extras are genuinely optional:
+
+```bash
+pip install -e '.[dev]'           # pytest — then `pytest` runs the 50 tests
+pip install -e '.[mel]'           # librosa — enables `siar train --mode log_mel`
+pip install -e '.[viz]'           # matplotlib — diagnostic figures only
+pip install -e '.[dev,mel,viz]'   # all of them
+```
+
+> **The spectrogram PNGs do not need `viz`.** SIAR writes them itself with stdlib `zlib`. The
+> library will not drag an imaging stack in just to save a picture, and the dashboard has no
+> build step and no CDN — so a plain `pip install .` gives you a working dashboard with nothing
+> else to install.
+
+### macOS
+
+The commands above are all you need — no Homebrew step. The `torch` and `soundfile` wheels are
+prebuilt for both Apple Silicon and Intel, and `soundfile` bundles libsndfile, so there is nothing
+to `brew install` and no `library not found: sndfile` to debug.
+
+The one thing that does bite: **the system `python3` is usually too old.** If `python3 --version`
+is below 3.13:
+
+```bash
+brew install python@3.13
+python3.13 -m venv .venv          # use the versioned binary explicitly
+```
+
+Torch will run on the CPU. There is no MPS/GPU path in SIAR and you do not want one — the design
+spends its parallelism on running many Optuna trials at once, not on making one trial faster.
 
 ---
 

@@ -1,0 +1,11 @@
+# SIAR — development dependencies.
+#
+#     pip install -r requirements-dev.txt
+#
+# Everything in requirements.txt, plus the optional extras declared in pyproject.toml:
+#
+#     dev   pytest        `pytest` runs the 50 tests
+#     mel   librosa       enables `siar train --mode log_mel`
+#     viz   matplotlib    diagnostic figures only — the spectrogram PNGs do NOT need it
+
+-e .[dev,mel,viz]

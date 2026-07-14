@@ -1,0 +1,12 @@
+# SIAR — runtime dependencies.
+#
+# The real dependency list lives in pyproject.toml, under [project].dependencies. This file exists
+# so that the conventional `pip install -r requirements.txt` works, and it deliberately delegates
+# rather than restating the list: two hand-maintained copies of the same dependencies drift, and
+# the one that drifts is always the one you are not looking at.
+#
+#     pip install -r requirements.txt
+#
+# Installs SIAR (editable) plus numpy, scipy, soundfile, torch and optuna.
+
+-e .
