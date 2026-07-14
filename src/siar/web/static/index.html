@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SIAR — Signal Intelligence and Reconnaissance</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">SIAR</span>
+    <span class="tag">Signal Intelligence &amp; Reconnaissance</span>
+  </div>
+  <div class="meta" id="health"></div>
+</header>
+
+<main>
+  <nav class="sidebar">
+    <h2>Runs</h2>
+    <p class="hint" id="runs-hint">loading…</p>
+    <ul class="runs" id="runs" role="list"></ul>
+
+    <h2>Recordings</h2>
+    <p class="hint" id="files-hint">select a run</p>
+    <ul class="files" id="files" role="list"></ul>
+  </nav>
+
+  <section class="content">
+    <div id="run-summary" class="summary" hidden></div>
+
+    <div id="viewer" class="viewer" hidden>
+      <div class="viewer-head">
+        <h3 id="file-title"></h3>
+        <div class="controls">
+          <label for="score-filter">
+            min score <output id="score-value">0</output>
+          </label>
+          <input type="range" id="score-filter" min="0" max="100" value="0" step="1">
+          <label class="check">
+            <input type="checkbox" id="show-boxes" checked> boxes
+          </label>
+        </div>
+      </div>
+
+      <!-- The PNG is exactly `frames` x `n_bins` pixels: one image pixel per grid cell.
+           The SVG overlays it in the same coordinate space via viewBox, so a box needs no
+           pixel maths in JS and cannot drift as the image is scaled. -->
+      <div class="spectrogram" id="spectrogram">
+        <img id="spec-img" alt="Spectrogram">
+        <svg id="overlay" preserveAspectRatio="none" aria-label="Detections"></svg>
+      </div>
+      <div class="axes">
+        <span id="ax-t0">0 s</span>
+        <span class="axis-mid" id="ax-f">frequency ↑</span>
+        <span id="ax-t1"></span>
+      </div>
+
+      <table class="detections" id="detections">
+        <thead>
+          <tr>
+            <th>#</th><th>start</th><th>end</th><th>low</th><th>high</th>
+            <th>score</th><th>fill</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint" id="det-hint"></p>
+    </div>
+
+    <div id="empty" class="empty">
+      <h3>No run selected</h3>
+      <p>Train a model and score a folder, then reload:</p>
+      <pre>siar train /path/to/normal-audio --name my-model
+siar run &lt;model-uid&gt; /path/to/audio-to-check
+siar dash</pre>
+      <p class="hint">Tutorial 02 walks through it end to end.</p>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

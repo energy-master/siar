@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# Local config + workspace
+siar.toml
+*.local.*
+
+# SIAR workspace artefacts (feature cache, results DB, run outputs)
+.siar/
+*.db
+*.db-wal
+*.db-shm
+*.npy
+
+# Tutorial demo corpus (regenerate with the tutorial scripts)
+siar-demo*/
+tutorials/quick_start/corpus/
