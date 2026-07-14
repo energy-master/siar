@@ -8,6 +8,7 @@ This module builds the argparse tree and dispatches; the work is in
 Subcommands:
 
 * ``siar version``   — print the package version.
+* ``siar activate``  — register an API key so the CLI is unlocked.
 * ``siar scan``      — walk a folder of audio, summarise it, register it as a dataset.
 * ``siar detectors`` — list the registered anomaly solutions.
 * ``siar train``     — learn "normal" from a folder, and save a detector.
@@ -15,6 +16,7 @@ Subcommands:
 * ``siar models``    — list trained models.
 * ``siar runs``      — list inference runs.
 * ``siar export``    — write a run's results to JSON.
+* ``siar export-ident`` — write IDent Dynamics decision sidecars for a run.
 * ``siar dash``      — serve the local results dashboard.
 * ``siar db``        — create or inspect the results database.
 
@@ -47,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     sub.add_parser("version", help="print the package version")
+
+    p_activate = sub.add_parser(
+        "activate",
+        help="register an API key so the CLI is unlocked",
+        description="Store a hashed API key.  After activation, set $SIAR_API_KEY in your "
+        "shell to authenticate every command.",
+    )
+    p_activate.add_argument("key", metavar="KEY", help="the API key to register")
 
     p_scan = sub.add_parser("scan", help="summarise and register a folder of audio")
     p_scan.add_argument("data", metavar="FOLDER", help="folder of audio to scan")
@@ -109,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-render", action="store_true", help="skip the spectrogram PNGs (faster, headless)"
     )
     p_run.add_argument("--out", metavar="PATH", help="also write the results JSON here")
+    p_run.add_argument(
+        "--ident",
+        metavar="FOLDER",
+        help="write IDent Dynamics decision sidecars to this folder",
+    )
 
     sub.add_parser("models", help="list trained models")
     sub.add_parser("runs", help="list inference runs")
@@ -116,6 +131,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="write a run's results to JSON")
     p_export.add_argument("run", metavar="RUN", help="run uid (or a unique prefix)")
     p_export.add_argument("--out", metavar="PATH", help="output file (default: stdout)")
+
+    p_ident = sub.add_parser(
+        "export-ident",
+        help="write IDent Dynamics decision sidecars for a run",
+        description="Produce one <recording>.json sidecar per scored file. Copy or symlink the "
+        "audio into the same folder, open it in IDent Dynamics, and the detections appear.",
+    )
+    p_ident.add_argument("run", metavar="RUN", help="run uid (or a unique prefix)")
+    p_ident.add_argument("out", metavar="FOLDER", help="destination folder for the sidecar files")
 
     p_dash = sub.add_parser("dash", help="serve the local results dashboard")
     p_dash.add_argument("--port", type=int, default=8420, help="port (default: 8420)")
@@ -148,8 +172,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 1
 
+    # Gate: every command except version and activate itself requires a valid API key.
+    _UNGATED = {"version", "activate"}
+    if args.command not in _UNGATED:
+        from siar.auth import require_key
+
+        require_key()
+
     handlers = {
         "version": commands.cmd_version,
+        "activate": commands.cmd_activate,
         "scan": commands.cmd_scan,
         "detectors": commands.cmd_detectors,
         "train": commands.cmd_train,
@@ -157,6 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "models": commands.cmd_models,
         "runs": commands.cmd_runs,
         "export": commands.cmd_export,
+        "export-ident": commands.cmd_export_ident,
         "dash": commands.cmd_dash,
         "db": commands.cmd_db,
     }

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "Cython>=3.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -33,6 +33,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 siar = ["web/static/**/*"]
+
+[tool.setuptools.exclude-package-data]
+# Cython transpiles .py -> .c -> .so.  The .c files land in the source tree during build and
+# must not ship in the wheel — they are readable C and would undo the obfuscation.
+siar = ["*.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

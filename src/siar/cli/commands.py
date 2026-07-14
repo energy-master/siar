@@ -17,10 +17,12 @@ from siar.data.dataset import scan_folder
 from siar.store.db import Store
 
 __all__ = [
+    "cmd_activate",
     "cmd_dash",
     "cmd_db",
     "cmd_detectors",
     "cmd_export",
+    "cmd_export_ident",
     "cmd_models",
     "cmd_run",
     "cmd_runs",
@@ -40,6 +42,23 @@ def cmd_version(_args: argparse.Namespace) -> int:
         Exit code 0.
     """
     print(f"siar {__version__}")
+    return 0
+
+
+def cmd_activate(args: argparse.Namespace) -> int:
+    """Register an API key so the CLI is unlocked.
+
+    Args:
+        args: Needs ``key``.
+
+    Returns:
+        Exit code 0, or 1 on failure.
+    """
+    from siar.auth import activate
+
+    path = activate(args.key)
+    print(f"activated — key hash written to {path}")
+    print("export SIAR_API_KEY=<your-key> in your shell to use SIAR")
     return 0
 
 
@@ -261,6 +280,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 _json.dump(export_run(store, result.run_uid), fh, indent=2)
             print(f"  wrote    {args.out}")
 
+        if args.ident:
+            from siar.store.export_ident import export_ident_sidecars
+
+            n = export_ident_sidecars(store, result.run_uid, args.ident)
+            print(f"  ident    {n} sidecar(s) in {args.ident}")
+
     print()
     print(f"run {result.run_uid}")
     print("  view it: siar dash")
@@ -341,6 +366,32 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"wrote {args.out}  ({n} detections across {payload['dataset']['n_files']} files)")
     else:
         print(_json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_export_ident(args: argparse.Namespace) -> int:
+    """Write IDent Dynamics decision sidecars for a run.
+
+    Produces one ``<recording>.json`` per scored file that had detections. Copy or symlink the
+    audio into the same folder, open it in IDent Dynamics, and the boxes appear.
+
+    Args:
+        args: Needs ``run`` and ``out``.
+
+    Returns:
+        Exit code 0, or 1 if the run is not found.
+    """
+    from siar.store.export_ident import export_ident_sidecars
+
+    with Store() as store:
+        store.migrate()
+        try:
+            n = export_ident_sidecars(store, args.run, args.out)
+        except KeyError as exc:
+            print(f"{exc} (try `siar runs`)", file=sys.stderr)
+            return 1
+
+    print(f"wrote {n} sidecar(s) to {args.out}")
     return 0
 
 
