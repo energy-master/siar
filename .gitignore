@@ -8,6 +8,11 @@ build/
 .venv/
 venv/
 
+# Cython distribution build byproducts — generated from .py by setup.py and
+# deleted again at the start of every build-dist.sh run.  Never hand-written.
+src/siar/**/*.c
+*.so
+
 # Local config + workspace
 siar.toml
 *.local.*

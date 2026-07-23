@@ -13,6 +13,7 @@ cloned the repo.
 | 01 | [Your first detector](01-first-detector.md) | The whole pipeline, in Python, on synthetic audio where you *know* the answer. Run this first. |
 | 02 | [Train, run, and see the results](02-train-run-dashboard.md) | The actual product: three commands, a database, and a dashboard. |
 | 03 | [View your results in the browser](03-view-results-in-the-browser.md) | The dashboard on its own: `siar dash`, how to triage, and why it opens empty. |
+| 04 | [Build for deployment](04-build-for-deployment.md) | Compile to `.so`, set up the API-key gate, and ship a wheel with no readable source. |
 
 Run any tutorial's script directly:
 
