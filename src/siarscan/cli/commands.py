@@ -66,14 +66,35 @@ def cmd_version(_args: Namespace) -> int:
     return 0
 
 
+#: What to tell someone whose terminal cannot prompt — a CI job, a pipe, an agent shell.
+_NO_TTY_HELP = (
+    "cannot prompt for credentials: this shell has no interactive input.\n"
+    "  Either run `siar-scanner login` in a normal terminal, or supply both without a prompt:\n"
+    "      siar-scanner login <username> --server <url>   with $SIAR_SCANNER_PASSWORD set\n"
+    "  Or skip logging in entirely by exporting a token you already have:\n"
+    "      export SIAR_SCANNER_TOKEN=...  SIAR_SCANNER_URL=..."
+)
+
+
 def cmd_login(args: Namespace) -> int:
     """Exchange IDent Dynamics credentials for a bearer token and save it."""
     base_url = args.server or load_credentials().get("base_url") or DEFAULT_BASE_URL
-    login_id = args.login or input("IDent Dynamics username or email: ").strip()
+
+    login_id = args.login
+    if not login_id:
+        try:
+            login_id = input("IDent Dynamics username or email: ").strip()
+        except EOFError:
+            return _err(_NO_TTY_HELP)
     if not login_id:
         return _err("no username given")
 
-    password = os.environ.get("SIAR_SCANNER_PASSWORD") or getpass.getpass("Password: ")
+    password = os.environ.get("SIAR_SCANNER_PASSWORD")
+    if not password:
+        try:
+            password = getpass.getpass("Password: ")
+        except (EOFError, getpass.GetPassWarning):
+            return _err(_NO_TTY_HELP)
     if not password:
         return _err("no password given")
 

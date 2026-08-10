@@ -40,12 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Start with: siar-scanner login, then siar-scanner algorithms.",
     )
     parser.add_argument("--version", action="version", version=f"siar-scanner {__version__}")
+    # Accepted on BOTH sides of the subcommand. `siar-scanner login --server URL` is what
+    # everyone types, and argparse rejects it if the option lives only on the top-level parser
+    # — so the top-level copy uses its own dest and main() folds the two together. Sharing one
+    # dest instead would let the subcommand's None clobber a value given before the subcommand.
     parser.add_argument(
         "--server",
+        dest="global_server",
         metavar="URL",
         help="IDent Dynamics install to talk to (default: the one you logged in to)",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
+
+    def add_server(target: argparse.ArgumentParser) -> None:
+        """Give a subcommand its own --server, so it works after the subcommand too."""
+        target.add_argument("--server", metavar="URL",
+                            help="IDent Dynamics install to talk to")
 
     sub.add_parser("version", help="print the package version and this machine's build tag")
 
@@ -60,9 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="username or email (prompted for if omitted)")
     p_login.add_argument("--device", metavar="LABEL",
                          help="how this machine is labelled in your account's token list")
+    add_server(p_login)
 
     sub.add_parser("logout", help="forget the cached token on this machine")
-    sub.add_parser("whoami", help="show who the cached token belongs to")
+    add_server(sub.add_parser("whoami", help="show who the cached token belongs to"))
 
     p_algos = sub.add_parser(
         "algorithms",
@@ -73,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_algos.add_argument("--params", action="store_true",
                          help="also print each algorithm's tunable parameters")
     p_algos.add_argument("--json", action="store_true", help="print the raw catalogue as JSON")
+    add_server(p_algos)
 
     p_scan = sub.add_parser(
         "scan",
@@ -103,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="download the build for this platform tag instead of this machine's")
     p_run.add_argument("--refresh", action="store_true",
                        help="re-download the algorithm even if it is cached")
+    add_server(p_run)
 
     grid = p_run.add_argument_group("analysis grid (defaults come from the algorithm)")
     grid.add_argument("--fft", type=int, metavar="N", help="FFT size, a power of two")
@@ -162,6 +175,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Fold the two --server spellings together, preferring the one nearest the subcommand.
+    # Every command reads args.server, including the ones that never take one.
+    args.server = getattr(args, "server", None) or getattr(args, "global_server", None)
     handler = _DISPATCH.get(args.command or "")
     if handler is None:
         parser.print_help()
