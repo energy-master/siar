@@ -1,7 +1,7 @@
 # Vixen Intelligence c.2026
 """Fixed-width table rendering for the terminal.
 
-Every ``siar-scanner`` listing is a table, and the alternative is hand-counted format strings.
+Every ``siar-app`` listing is a table, and the alternative is hand-counted format strings.
 Those drift: a value outgrows its column, the header does not move with it, and the output
 misaligns in exactly the cases — long slugs, long descriptions — where alignment is the only
 thing making it readable.

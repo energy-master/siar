@@ -10,7 +10,7 @@ lane preview, laid out so the app's existing folder-open path finds them without
   <relpath>/recording.wav               the source, copied (or hardlinked with --link)
   <relpath>/recording.structures.json   the boxes
   <relpath>/recording.png               the 200x64 lane thumbnail
-  siar-scanner-run.json                 what was run, over what, with what, and what came back
+  siar-app-run.json                 what was run, over what, with what, and what came back
 ```
 
 Three decisions are load-bearing:
@@ -36,6 +36,8 @@ import os
 import shutil
 from typing import Any
 
+from siarapp.io.performance import PERFORMANCE_NAME
+
 __all__ = [
     "RUN_MANIFEST_NAME",
     "SIDECAR_FORMAT",
@@ -48,10 +50,18 @@ __all__ = [
 SIDECAR_SUFFIX = ".structures.json"
 
 #: Written at the root of every output folder.
-RUN_MANIFEST_NAME = "siar-scanner-run.json"
+RUN_MANIFEST_NAME = "siar-app-run.json"
 
 #: Stamped into every sidecar so a future reader can tell what it is holding.
+#:
+#: Deliberately still says "scanner" after the rename to siar-app. It is a wire-format version,
+#: not a product name: every sidecar ever written carries it, the web app matches on it, and
+#: changing it would mean a v2 that nothing gains from.
 SIDECAR_FORMAT = "siar-scanner-structures-v1"
+
+#: The family a model belongs to when its bundle does not say — which is every bundle built
+#: before families existed, all of which are structure scanners.
+DEFAULT_FAMILY = "structure_scanners"
 
 
 def sidecar_document(
@@ -61,6 +71,7 @@ def sidecar_document(
     algorithm: str,
     structures: list[dict],
     algorithm_version: str = "",
+    family: str = DEFAULT_FAMILY,
     params: dict | None = None,
     stft: dict | None = None,
     source_path: str = "",
@@ -77,8 +88,9 @@ def sidecar_document(
         duration_sec: Recording length.
         algorithm: The slug that produced the boxes. Becomes the model name the app files them
             under, so the Structures panel's per-model toggles read as scanner names.
-        structures: The region dicts (see :data:`siarscan.grid.REGION_FIELDS`).
+        structures: The region dicts (see :data:`siarapp.grid.REGION_FIELDS`).
         algorithm_version: The algorithm's own version.
+        family: The model family, from the bundle's manifest.
         params: The run-time parameters it was configured with.
         stft: ``{"fft", "hop", "window", "sample_rate"}`` the grid was built at.
         source_path: Where the recording was read from, for provenance.
@@ -92,6 +104,10 @@ def sidecar_document(
         "duration_sec": round(float(duration_sec), 4),
         "algorithm": algorithm,
         "algorithm_version": algorithm_version,
+        # What KIND of model produced this, so a reader can route the document without
+        # inferring the answer from which keys happen to be present. A structure scanner and a
+        # click detector both emit boxes; only the family says which panel they belong in.
+        "family": family or DEFAULT_FAMILY,
         "params": params or {},
         "stft": stft or {},
         "source_path": source_path,
@@ -194,6 +210,13 @@ class OutputFolder:
         """Write the run manifest at the folder root. Returns the path."""
         path = os.path.join(self.root, RUN_MANIFEST_NAME)
         blob = json.dumps(manifest, indent=2, default=json_default) + "\n"
+        _write_atomic(path, blob.encode("utf-8"))
+        return path
+
+    def write_performance(self, document: dict) -> str:
+        """Write the performance report at the folder root. Returns the path."""
+        path = os.path.join(self.root, PERFORMANCE_NAME)
+        blob = json.dumps(document, indent=2, default=json_default) + "\n"
         _write_atomic(path, blob.encode("utf-8"))
         return path
 

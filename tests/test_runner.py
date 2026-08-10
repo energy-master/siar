@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from siarscan.loader import load_local
-from siarscan.runner import RunOptions, plan_grid, run_folder
+from siarapp.loader import load_local
+from siarapp.runner import RunOptions, plan_grid, run_folder
 
 #: A conforming algorithm package: finds one box per loud frame band, and nothing else.
 STUB = '''
@@ -133,7 +133,7 @@ def test_run_folder_writes_the_whole_output_folder(corpus, stub, tmp_path):
     assert (out / "station-b" / "quiet.wav").is_file()
     assert (out / "station-b" / "quiet.structures.json").is_file()
     # ...and the run manifest at the root.
-    assert (out / "siar-scanner-run.json").is_file()
+    assert (out / "siar-app-run.json").is_file()
 
 
 def test_sidecar_carries_what_the_app_reads(corpus, stub, tmp_path):
@@ -229,7 +229,7 @@ def test_limit_and_no_recursive_bound_the_work(corpus, stub, tmp_path):
 
 
 def test_load_local_rejects_a_package_with_no_scan(tmp_path):
-    from siarscan.grid import ScannerError
+    from siarapp.grid import ScannerError
 
     src = _write_package(tmp_path / "algo", "no_scan", "def algorithm(manifest=None):\n    return object()\n")
     with pytest.raises(ScannerError, match="no scan"):
@@ -237,7 +237,7 @@ def test_load_local_rejects_a_package_with_no_scan(tmp_path):
 
 
 def test_load_local_rejects_a_package_with_no_factory(tmp_path):
-    from siarscan.grid import ScannerError
+    from siarapp.grid import ScannerError
 
     src = _write_package(tmp_path / "algo", "no_factory", "x = 1\n")
     with pytest.raises(ScannerError, match="factory"):
@@ -246,8 +246,8 @@ def test_load_local_rejects_a_package_with_no_factory(tmp_path):
 
 def test_output_folder_may_not_be_the_source(corpus, stub):
     """Writing copies of the recordings into the folder being walked would recurse."""
-    from siarscan.cli.main import build_parser
-    from siarscan.cli import commands
+    from siarapp.cli.main import build_parser
+    from siarapp.cli import commands
 
     args = build_parser().parse_args(
         ["run", str(corpus), "--out", str(corpus), "--algorithm-path", "x"]
@@ -266,3 +266,98 @@ def test_thumbnails_can_be_turned_off(corpus, stub, tmp_path):
     run_folder(stub, str(corpus), str(out), RunOptions(thumbnails=False))
     assert not (out / "loud.png").exists()
     assert os.path.isfile(out / "loud.structures.json")
+
+
+def test_the_folder_is_openable_before_the_run_finishes(corpus, stub, tmp_path):
+    """The point of the whole flush loop: drop an overnight scan into the app while it runs.
+
+    Read from inside the progress callback, which is the only place "mid-run" exists in a
+    synchronous loop — after the first recording there must already be a run manifest, a
+    performance report, and a progress block that admits the run is not done.
+    """
+    out = tmp_path / "out"
+    seen = []
+
+    def watch(done, total, _result):
+        if done < total:
+            perf = json.loads((out / "siar-app-performance.json").read_text())
+            run = json.loads((out / "siar-app-run.json").read_text())
+            seen.append((done, perf["progress"], run["progress"]["state"], run["files"]))
+
+    run_folder(stub, str(corpus), str(out), RunOptions(), progress=watch)
+
+    assert seen, "no document was written until the run had finished"
+    done, progress, run_state, run_files = seen[0]
+    assert progress["state"] == "running"
+    assert run_state == "running"
+    # The manifest describes what has been done, not what will be: a partially scanned folder
+    # claiming three files would make the app draw two empty lanes.
+    assert run_files == done
+    assert progress["files_total"] == 3
+    assert 0.0 < progress["fraction"] < 1.0
+    assert progress["files_remaining"] == 3 - done
+
+
+def test_the_final_write_says_the_run_finished(corpus, stub, tmp_path):
+    out = tmp_path / "out"
+    run_folder(stub, str(corpus), str(out), RunOptions())
+
+    progress = json.loads((out / "siar-app-performance.json").read_text())["progress"]
+    assert progress["state"] == "complete"
+    assert progress["fraction"] == 1.0
+    assert progress["eta_sec"] == 0.0
+    assert progress["files_done"] == progress["files_total"] == 3
+    assert progress["files_remaining"] == 0
+    assert progress["audio_total_sec"] > 0
+
+
+def test_the_estimate_is_made_in_audio_seconds_not_files():
+    """Half the files can be a tenth of the work, and the bar has to say so."""
+    from siarapp.io.performance import progress_block
+
+    # Ten seconds in, one short file of a hundred done: 1% of the audio, 50% of the files.
+    block = progress_block(
+        started=0.0, now=10.0,
+        files_total=100, files_done=50, files_worked=50,
+        audio_total_sec=10_000.0, audio_done_sec=100.0, audio_worked_sec=100.0,
+    )
+    assert block["fraction"] == 0.01
+    # 9,900 s of audio left at 10 audio-seconds per wall second.
+    assert block["eta_sec"] == pytest.approx(990.0)
+    assert block["eta_at"]
+
+
+def test_the_estimate_holds_off_until_it_has_something_to_go_on():
+    """A null ETA renders as "estimating"; a zero would render as "finished"."""
+    from siarapp.io.performance import progress_block
+
+    block = progress_block(
+        started=0.0, now=0.0, files_total=100, files_done=0, files_worked=0,
+        audio_total_sec=10_000.0,
+    )
+    assert block["eta_sec"] is None
+    assert block["eta_at"] == ""
+    assert block["state"] == "running"
+
+
+def test_resumed_files_do_not_inflate_the_estimate(corpus, stub, tmp_path):
+    """A resume that skips most of the corpus must not quote the hours it is not going to spend."""
+    from siarapp.io.performance import progress_block
+
+    # 90 of 100 files handled in a second and only 9 of them actually scanned. The 100 s of
+    # audio left is charged at the same 1-in-10 rate, not in full: 10 s of work at 10x.
+    block = progress_block(
+        started=0.0, now=1.0,
+        files_total=100, files_done=90, files_worked=9,
+        audio_total_sec=1000.0, audio_done_sec=900.0, audio_worked_sec=10.0,
+    )
+    assert block["eta_sec"] == pytest.approx(1.0)
+
+    # The same run without the discount would quote ten times as long — a resumed scan of a
+    # nearly-finished corpus reporting minutes of work that will never happen.
+    naive = progress_block(
+        started=0.0, now=1.0,
+        files_total=100, files_done=90, files_worked=90,
+        audio_total_sec=1000.0, audio_done_sec=900.0, audio_worked_sec=10.0,
+    )
+    assert naive["eta_sec"] == pytest.approx(10.0)

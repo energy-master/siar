@@ -1,18 +1,18 @@
 # Vixen Intelligence c.2026
-"""The workspace at ``~/.siar-scanner`` — credentials, the algorithm cache, run history.
+"""The workspace at ``~/.siar-app`` — credentials, the algorithm cache, run history.
 
 One directory, three things in it, and a clear rule about which of them may be deleted: all of
 them. Credentials cost a re-login, the cache costs a re-download, the history is a convenience.
 Nothing here is the product of a scan — that goes in the output folder the user names.
 
 ```
-~/.siar-scanner/
+~/.siar-app/
   credentials.json           the bearer token, mode 0600
   algorithms/<slug>/<platform>/   unpacked bundles, one tree per build
-  runs.json                  the last RUN_HISTORY_MAX runs, for `siar-scanner runs`
+  runs.json                  the last RUN_HISTORY_MAX runs, for `siar-app runs`
 ```
 
-``$SIAR_SCANNER_HOME`` moves the lot, which is what a shared or containerised install needs.
+``$SIAR_APP_HOME`` moves the lot, which is what a shared or containerised install needs.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ __all__ = [
     "clear_credentials",
     "default_platform_tag",
     "home",
+    "legacy_env",
     "load_credentials",
     "platform_compatible",
     "read_json",
@@ -38,7 +39,7 @@ __all__ = [
     "write_json",
 ]
 
-#: Where the CLI talks to unless ``--server`` or ``$SIAR_SCANNER_URL`` says otherwise.
+#: Where the CLI talks to unless ``--server`` or ``$SIAR_APP_URL`` says otherwise.
 DEFAULT_BASE_URL = "https://goident.ai"
 
 #: Runs kept in the local history. Enough to answer "what did I run last week", far short of
@@ -46,15 +47,47 @@ DEFAULT_BASE_URL = "https://goident.ai"
 RUN_HISTORY_MAX = 200
 
 
+#: The workspace this tool used when it was called siar-scanner, and the environment-variable
+#: prefix that went with it. Both are still honoured: a machine that was logged in before the
+#: rename must not silently lose its credentials, its algorithm cache and its licence
+#: acceptance over a change of product name.
+_LEGACY_DIR = ".siar-scanner"
+_LEGACY_ENV_PREFIX = "SIAR_SCANNER_"
+
+
+def legacy_env(name: str) -> str | None:
+    """Read ``SIAR_APP_<name>``, falling back to the pre-rename ``SIAR_SCANNER_<name>``."""
+    return os.environ.get(f"SIAR_APP_{name}") or os.environ.get(f"{_LEGACY_ENV_PREFIX}{name}")
+
+
 def home() -> str:
     """The workspace directory, created if absent.
 
+    A ``~/.siar-scanner`` left over from before the rename is **moved** to the new name the
+    first time this runs, rather than being read in place. One workspace beats two: reading the
+    old path forever would mean every later feature has to know about both, and copying would
+    leave a stale token behind on disk.
+
     Returns:
-        Absolute path — ``$SIAR_SCANNER_HOME`` if set, else ``~/.siar-scanner``.
+        Absolute path — ``$SIAR_APP_HOME`` (or the legacy ``$SIAR_SCANNER_HOME``) if set, else
+        ``~/.siar-app``.
     """
-    path = os.environ.get("SIAR_SCANNER_HOME") or os.path.join(
-        os.path.expanduser("~"), ".siar-scanner"
-    )
+    override = legacy_env("HOME")
+    if override:
+        os.makedirs(override, mode=0o700, exist_ok=True)
+        return os.path.abspath(override)
+
+    path = os.path.join(os.path.expanduser("~"), ".siar-app")
+    legacy = os.path.join(os.path.expanduser("~"), _LEGACY_DIR)
+    if not os.path.isdir(path) and os.path.isdir(legacy):
+        try:
+            os.rename(legacy, path)
+            print(f"Moved {legacy} to {path} (siar-scanner is now siar-app).", file=sys.stderr)
+        except OSError:
+            # A failed move is not a reason to fail the command — fall back to the old
+            # directory and carry on, rather than silently starting from an empty workspace.
+            os.makedirs(legacy, mode=0o700, exist_ok=True)
+            return os.path.abspath(legacy)
     os.makedirs(path, mode=0o700, exist_ok=True)
     return os.path.abspath(path)
 
@@ -109,17 +142,19 @@ def _credentials_path() -> str:
 def load_credentials() -> dict:
     """The saved login, or ``{}``.
 
-    ``$SIAR_SCANNER_TOKEN`` and ``$SIAR_SCANNER_URL`` override the file, so a CI job or a
-    container can run without ``siar-scanner login`` ever having been called.
+    ``$SIAR_APP_TOKEN`` and ``$SIAR_APP_URL`` override the file, so a CI job or a
+    container can run without ``siar-app login`` ever having been called.
 
     Returns:
         ``{"base_url": ..., "token": ..., "username": ...}`` — possibly partial.
     """
     creds = dict(read_json(_credentials_path(), {}) or {})
-    if os.environ.get("SIAR_SCANNER_TOKEN"):
-        creds["token"] = os.environ["SIAR_SCANNER_TOKEN"]
-    if os.environ.get("SIAR_SCANNER_URL"):
-        creds["base_url"] = os.environ["SIAR_SCANNER_URL"]
+    token = legacy_env("TOKEN")
+    if token:
+        creds["token"] = token
+    url = legacy_env("URL")
+    if url:
+        creds["base_url"] = url
     creds.setdefault("base_url", DEFAULT_BASE_URL)
     return creds
 

@@ -4,7 +4,7 @@
 Without one, a folder opened in IDent Dynamics is a column of bare bars: the user clicks a lane,
 waits for a decode, and only then finds out whether that recording was worth opening. With one,
 the strip reads as a waterfall and the interesting files are visible at a glance. Since
-siar-scanner has already decoded every file to scan it, rendering the thumbnail costs one extra
+siar-app has already decoded every file to scan it, rendering the thumbnail costs one extra
 sparse transform per recording — a few milliseconds against seconds of scanning.
 
 A faithful port of the app's ``js/thumbnail.js``, by way of ``brahma/viz/thumbnail.py``:
@@ -13,7 +13,7 @@ A faithful port of the app's ``js/thumbnail.js``, by way of ``brahma/viz/thumbna
   evenly across the signal, not a fully-overlapped one (200 transforms, not ~110k);
 * dB normalisation against the file's own peak with a :data:`DB_FLOOR` floor;
 * average-pooling the frequency axis down to :data:`THUMB_BINS`;
-* the app's polynomial viridis (see :mod:`siarscan.viz.colormap`);
+* the app's polynomial viridis (see :mod:`siarapp.viz.colormap`);
 * y flipped so the lowest frequency sits at the bottom.
 
 Three implementations of this picture now exist — browser, brahma box, and here. They are
@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from siarscan.viz.colormap import viridis_lut
-from siarscan.viz.png import encode_png
+from siarapp.viz.colormap import viridis_lut
+from siarapp.viz.png import encode_png
 
 __all__ = [
     "DB_FLOOR",
@@ -56,7 +56,7 @@ def _sparse_magnitude_grid(signal: np.ndarray, fft_size: int, num_frames: int) -
     """Place ``num_frames`` windows evenly across ``signal`` and transform each one.
 
     The hop here is far *larger* than the window, which is why this does not go through
-    :mod:`siarscan.dsp.stft` — that requires ``hop <= fft_size``, as does the browser's.
+    :mod:`siarapp.dsp.stft` — that requires ``hop <= fft_size``, as does the browser's.
 
     Args:
         signal: Mono signal.

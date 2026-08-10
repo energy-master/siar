@@ -1,20 +1,23 @@
 # Vixen Intelligence c.2026
-"""The ``siar-scanner`` command line.
+"""The ``siar-app`` command line.
 
 This module builds the argparse tree and dispatches; the work is in
-:mod:`siarscan.cli.commands`. The console script ``siar-scanner`` (see ``pyproject.toml``) calls
+:mod:`siarapp.cli.commands`. The console script ``siar-app`` (see ``pyproject.toml``) calls
 :func:`main`.
 
 Subcommands:
 
-* ``siar-scanner version``    — the package version and this machine's build tag.
-* ``siar-scanner login``      — sign in to IDent Dynamics and cache a token.
-* ``siar-scanner logout``     — forget the cached token.
-* ``siar-scanner whoami``     — who the cached token belongs to.
-* ``siar-scanner algorithms`` — the scanning algorithms your account can download.
-* ``siar-scanner scan``       — summarise a folder from headers alone.
-* ``siar-scanner run``        — scan a folder and build an output folder for the app.
-* ``siar-scanner runs``       — what has been run from this machine.
+* ``siar-app version``    — the package version and this machine's build tag.
+* ``siar-app license``    — show the licence, or accept it non-interactively.
+* ``siar-app login``      — sign in to IDent Dynamics and cache a token.
+* ``siar-app logout``     — forget the cached token.
+* ``siar-app whoami``     — who the cached token belongs to.
+* ``siar-app algorithms`` — the scanning algorithms your account can download.
+* ``siar-app installed``  — the algorithm bundles on this machine, and their versions.
+* ``siar-app feedback``   — rate how well an algorithm performed, 0-9.
+* ``siar-app scan``       — summarise a folder from headers alone.
+* ``siar-app run``        — scan a folder and build an output folder for the app.
+* ``siar-app runs``       — what has been run from this machine.
 """
 from __future__ import annotations
 
@@ -22,10 +25,19 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from siarscan import __version__
-from siarscan.cli import commands
+from siarapp import __version__
+from siarapp.branding import PRODUCT, TAGLINE, print_banner
+from siarapp.cli import commands
+from siarapp.licensing import require_license
 
 __all__ = ["build_parser", "main"]
+
+#: Commands that run before the licence has been accepted.
+#:
+#: ``version`` and ``license`` are the two a user needs in order to answer the question the gate
+#: is asking — what is this, and what am I agreeing to. Gating either would be a licence you
+#: have to accept before you may read it.
+_UNGATED = frozenset({"version", "license"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,12 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
         The configured :class:`argparse.ArgumentParser`.
     """
     parser = argparse.ArgumentParser(
-        prog="siar-scanner",
-        description="Run the IDent Dynamics structure scanners over a folder of recordings.",
-        epilog="Start with: siar-scanner login, then siar-scanner algorithms.",
+        prog="siar-app",
+        description=f"{PRODUCT} — {TAGLINE}. "
+                    "Run the IDent Dynamics structure scanners over a folder of recordings.",
+        epilog="Start with: siar-app login, then siar-app algorithms.",
     )
-    parser.add_argument("--version", action="version", version=f"siar-scanner {__version__}")
-    # Accepted on BOTH sides of the subcommand. `siar-scanner login --server URL` is what
+    parser.add_argument("--version", action="version", version=f"siar-app {__version__}")
+    # Accepted on BOTH sides of the subcommand. `siar-app login --server URL` is what
     # everyone types, and argparse rejects it if the option lives only on the top-level parser
     # — so the top-level copy uses its own dest and main() folds the two together. Sharing one
     # dest instead would let the subcommand's None clobber a value given before the subcommand.
@@ -59,11 +72,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", help="print the package version and this machine's build tag")
 
+    p_license = sub.add_parser(
+        "license",
+        help="show the licence, or accept it without a prompt",
+        description="The terms this command line is offered under. They are shown once, on "
+        "first use, and the acceptance is recorded in your workspace. This covers the CLI "
+        "only — the scanning algorithms it downloads are proprietary and licensed separately.",
+    )
+    p_license.add_argument("--accept", action="store_true",
+                           help="record acceptance and exit — for a script or a container")
+
     p_login = sub.add_parser(
         "login",
         help="sign in to IDent Dynamics and cache a token",
         description="Exchange your IDent Dynamics username (or email) and password for a "
-        "bearer token, cached at ~/.siar-scanner/credentials.json. Set $SIAR_SCANNER_PASSWORD "
+        "bearer token, cached at ~/.siar-app/credentials.json. Set $SIAR_APP_PASSWORD "
         "to avoid the prompt in a script.",
     )
     p_login.add_argument("login", nargs="?", metavar="USERNAME",
@@ -81,10 +104,42 @@ def build_parser() -> argparse.ArgumentParser:
         description="The catalogue your IDent Dynamics super user has published. Each row's "
         "description is theirs, so it says what the algorithm is actually being used for.",
     )
+    p_algos.add_argument("--family", metavar="NAME",
+                         help="only models in this family (name or title)")
     p_algos.add_argument("--params", action="store_true",
                          help="also print each algorithm's tunable parameters")
     p_algos.add_argument("--json", action="store_true", help="print the raw catalogue as JSON")
     add_server(p_algos)
+
+    p_installed = sub.add_parser(
+        "installed",
+        help="list the algorithm bundles downloaded to this machine",
+        description="What is cached under ~/.siar-app/algorithms, and at which version. "
+        "Works offline — it reads each bundle's manifest and never imports one.",
+    )
+    p_installed.add_argument("--check", action="store_true",
+                             help="also ask the server whether a newer version is published")
+    p_installed.add_argument("--json", action="store_true", help="print the raw list as JSON")
+    add_server(p_installed)
+
+    p_feedback = sub.add_parser(
+        "feedback",
+        help="rate how well an algorithm performed, 0-9",
+        description="Tell the people who publish these algorithms how one did on your "
+        "recordings. The rating is filed against the version you have installed, since that "
+        "is the build whose output you are judging, and one rating per person per build is "
+        "kept — rating it again replaces your last answer.",
+    )
+    p_feedback.add_argument("slug", nargs="?", metavar="NAME",
+                            help="which model (see `siar-app installed`)")
+    p_feedback.add_argument("--score", "-s", type=int, metavar="0-9",
+                            help="0 found nothing useful, 9 found what was there and "
+                                 "little else (prompted for if omitted)")
+    p_feedback.add_argument("--comment", "-m", metavar="TEXT",
+                            help="a sentence on what it did well or badly")
+    p_feedback.add_argument("--mine", action="store_true",
+                            help="list the ratings you have given instead of adding one")
+    add_server(p_feedback)
 
     p_scan = sub.add_parser(
         "scan",
@@ -104,8 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
         "thumbnail per lane. Open that folder in IDent Dynamics to work through the results.",
     )
     p_run.add_argument("folder", metavar="FOLDER", help="root folder of WAV/FLAC recordings")
-    p_run.add_argument("--algorithm", "-a", metavar="SLUG",
-                       help="which algorithm (see `siar-scanner algorithms`)")
+    p_run.add_argument("--algorithm", "-a", metavar="NAME",
+                       help="which model (see `siar-app algorithms`)")
     p_run.add_argument("--out", "-o", required=True, metavar="DIR",
                        help="output folder to create")
     p_run.add_argument("--algorithm-path", metavar="DIR",
@@ -154,10 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
 #: Subcommand name -> handler. A dict rather than a chain of ifs, so adding a command is one line.
 _DISPATCH = {
     "version": commands.cmd_version,
+    "license": commands.cmd_license,
     "login": commands.cmd_login,
     "logout": commands.cmd_logout,
     "whoami": commands.cmd_whoami,
     "algorithms": commands.cmd_algorithms,
+    "installed": commands.cmd_installed,
+    "feedback": commands.cmd_feedback,
     "scan": commands.cmd_scan,
     "run": commands.cmd_run,
     "runs": commands.cmd_runs,
@@ -182,6 +240,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 0
+
+    # Banner first, so the licence prompt appears under the name of the thing asking.
+    print_banner(__version__)
+    if args.command not in _UNGATED and not require_license():
+        return 1
     try:
         return handler(args)
     except KeyboardInterrupt:

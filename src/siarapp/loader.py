@@ -3,7 +3,7 @@
 
 An algorithm ships as a zip: an obfuscated Python package, PyArmor's runtime, a licence key if
 the build has one, and a ``manifest.json`` describing what is inside. This module downloads it
-once, unpacks it under ``~/.siar-scanner/algorithms/<slug>/<platform>/``, makes it importable,
+once, unpacks it under ``~/.siar-app/algorithms/<slug>/<platform>/``, makes it importable,
 and calls its factory. Every later run finds the cache and needs no network at all — which is
 the point for a survey vessel or an air-gapped lab.
 
@@ -34,14 +34,21 @@ import os
 import shutil
 import sys
 import zipfile
+from collections.abc import Callable
 from typing import Any
 
-from siarscan.config import algorithm_cache_dir, default_platform_tag, platform_compatible
-from siarscan.grid import ScannerError
+from siarapp.config import (
+    algorithm_cache_dir,
+    default_platform_tag,
+    home,
+    platform_compatible,
+)
+from siarapp.grid import ScannerError
 
 __all__ = [
     "FACTORY_NAME",
     "AlgorithmHandle",
+    "installed_algorithms",
     "load_cached",
     "load_local",
     "load_remote",
@@ -53,7 +60,12 @@ FACTORY_NAME = "algorithm"
 
 #: Marker written beside an unpacked bundle so a later run knows the cache is complete. Without
 #: it, an interrupted unpack leaves a half-tree that imports and then fails oddly.
-_STAMP = ".siar-scanner-complete"
+_STAMP = ".siar-app-complete"
+
+#: The same marker under its pre-rename name. Read, never written: a cache unpacked by
+#: siar-scanner is a perfectly good cache, and treating it as incomplete would re-download every
+#: bundle on the machine for no reason but a change of product name.
+_LEGACY_STAMP = ".siar-scanner-complete"
 
 
 class AlgorithmHandle:
@@ -126,7 +138,8 @@ def unpack_bundle(data: bytes, dest: str) -> str:
 
 def _is_complete(path: str) -> bool:
     """True when ``path`` holds a fully-unpacked bundle."""
-    return os.path.isfile(os.path.join(path, _STAMP))
+    return (os.path.isfile(os.path.join(path, _STAMP))
+            or os.path.isfile(os.path.join(path, _LEGACY_STAMP)))
 
 
 def _read_manifest(root: str) -> dict:
@@ -271,14 +284,17 @@ def load_cached(slug: str, platform_tag: str | None = None) -> AlgorithmHandle |
 
 
 def load_remote(client: Any, slug: str, platform_tag: str | None = None,
-                *, refresh: bool = False) -> AlgorithmHandle:
+                *, refresh: bool = False,
+                on_progress: Callable[[int, int | None], None] | None = None) -> AlgorithmHandle:
     """Load an algorithm, downloading it first if the cache does not have it.
 
     Args:
-        client: A :class:`siarscan.api.Client`.
+        client: A :class:`siarapp.api.Client`.
         slug: The algorithm slug.
         platform_tag: Which build; defaults to this machine's.
         refresh: Re-download even when cached — how a user picks up a republished build.
+        on_progress: Reported to only when a download actually happens, so a cache hit stays
+            silent rather than flashing a completed bar at someone who waited for nothing.
 
     Returns:
         The loaded :class:`AlgorithmHandle`.
@@ -292,9 +308,79 @@ def load_remote(client: Any, slug: str, platform_tag: str | None = None,
         if cached is not None:
             return cached
 
-    data = client.bundle(slug, tag)
+    data = client.bundle(slug, tag, on_progress=on_progress)
     root = unpack_bundle(data, algorithm_cache_dir(slug, tag))
     return _load_tree(root, slug, tag)
+
+
+def installed_algorithms() -> list[dict]:
+    """Every fully-unpacked bundle in the cache, newest download first.
+
+    Reads ``manifest.json`` and stats the tree; it never imports anything. That is the whole
+    design of this function — answering "what have I got, and which version" must not run a
+    customer's obfuscated code, must not need a network, and must not fail because one of the
+    bundles is built for a different machine than the one asking.
+
+    Returns:
+        One dict per build with ``slug``, ``platform``, ``version``, ``family``, ``title``,
+        ``bytes``, ``downloaded_at`` (epoch seconds), ``runnable`` and ``root``. Incomplete
+        directories — an interrupted unpack — are skipped, because they are not installed.
+    """
+    root_dir = os.path.join(home(), "algorithms")
+    if not os.path.isdir(root_dir):
+        return []
+
+    rows: list[dict] = []
+    for slug_dir in sorted(os.listdir(root_dir)):
+        slug_path = os.path.join(root_dir, slug_dir)
+        if not os.path.isdir(slug_path):
+            continue
+        for platform_dir in sorted(os.listdir(slug_path)):
+            tree = os.path.join(slug_path, platform_dir)
+            if not os.path.isdir(tree) or not _is_complete(tree):
+                continue
+            manifest = _read_manifest(tree)
+            build_tag = str(manifest.get("platform") or platform_dir)
+            rows.append({
+                "slug": str(manifest.get("slug") or slug_dir),
+                "platform": build_tag,
+                "version": str(manifest.get("version") or "?"),
+                "family": str(manifest.get("family") or ""),
+                "title": str(manifest.get("title") or ""),
+                "bytes": _tree_bytes(tree),
+                "downloaded_at": _stamped_at(tree),
+                "runnable": platform_compatible(build_tag),
+                "root": tree,
+            })
+    rows.sort(key=lambda r: (-r["downloaded_at"], r["slug"]))
+    return rows
+
+
+def _tree_bytes(root: str) -> int:
+    """Total size on disk of an unpacked bundle."""
+    total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def _stamped_at(root: str) -> int:
+    """When the bundle finished unpacking — the stamp's mtime, or 0 if it cannot be read.
+
+    The stamp rather than the directory, because a run that reads the tree can touch the
+    directory and would otherwise make an old download look like today's.
+    """
+    try:
+        try:
+            return int(os.path.getmtime(os.path.join(root, _STAMP)))
+        except OSError:
+            return int(os.path.getmtime(os.path.join(root, _LEGACY_STAMP)))
+    except OSError:
+        return 0
 
 
 def load_local(path: str, slug: str = "") -> AlgorithmHandle:
@@ -323,9 +409,15 @@ def load_local(path: str, slug: str = "") -> AlgorithmHandle:
     if pkg_dir is None:
         raise ScannerError(f"no Python package (a directory with __init__.py) under {root}")
     module = _import_from(pkg_dir)
-    algorithm = _construct(module, {}, slug or os.path.basename(pkg_dir))
+    # A slug given here is passed to the factory as a one-key manifest, because that is the only
+    # thing a preset is selected by. Without it `--algorithm-path pkg/src -a <preset>` silently
+    # ran the package's DEFAULT preset and then labelled every sidecar with the preset that was
+    # asked for — the one failure mode a development path must not have, since the whole point
+    # of it is trying a preset before a bundle exists.
+    manifest = {"slug": slug} if slug else {}
+    algorithm = _construct(module, manifest, slug or os.path.basename(pkg_dir))
     resolved = slug or str(getattr(algorithm, "slug", "") or os.path.basename(pkg_dir))
-    return AlgorithmHandle(algorithm, resolved, {}, pkg_dir, "source")
+    return AlgorithmHandle(algorithm, resolved, manifest, pkg_dir, "source")
 
 
 def _has_init(path: str) -> bool:

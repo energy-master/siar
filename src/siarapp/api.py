@@ -25,15 +25,20 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
-from siarscan.config import DEFAULT_BASE_URL, default_platform_tag, load_credentials
+from siarapp.config import DEFAULT_BASE_URL, default_platform_tag, load_credentials
 
 __all__ = ["ApiError", "AuthError", "Client", "client_from_credentials"]
 
 #: Seconds before a request gives up. Generous: a bundle download crosses the public internet
 #: and the box may be rendering thumbnails for someone else at the time.
 _TIMEOUT = 120
+
+#: Read size for a download being reported on. Small enough that the bar moves on a slow link,
+#: large enough that the callback is not the expensive part of the transfer.
+_CHUNK = 64 * 1024
 
 
 class ApiError(RuntimeError):
@@ -75,6 +80,7 @@ class Client:
         method: str = "GET",
         body: dict | None = None,
         raw: bool = False,
+        on_progress: Callable[[int, int | None], None] | None = None,
     ) -> Any:
         """Perform one request and return parsed JSON, or raw bytes when ``raw``.
 
@@ -83,13 +89,16 @@ class Client:
             method: HTTP method.
             body: JSON body for a POST.
             raw: Return the response bytes instead of parsing them. Used for bundle downloads.
+            on_progress: Called as ``(bytes_so_far, total_or_None)`` while the body is read.
+                Passing it switches the read from one blocking call to a chunked loop, which is
+                the only difference between a download that looks hung and one that does not.
 
         Returns:
             The parsed JSON object, or the response bytes.
 
         Raises:
             AuthError: On 401/403 — the actionable case, and worth its own type so the CLI can
-                say "run siar-scanner login" instead of printing a status code.
+                say "run siar-app login" instead of printing a status code.
             ApiError: On any other failure, transport included.
         """
         url = self.base_url + path
@@ -104,7 +113,10 @@ class Client:
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                payload = resp.read()
+                if on_progress is None:
+                    payload = resp.read()
+                else:
+                    payload = _read_reporting(resp, on_progress)
         except urllib.error.HTTPError as e:
             detail, code = _error_detail(e)
             message = f"{method} {path} failed ({e.code}): {detail}"
@@ -135,7 +147,7 @@ class Client:
             login_id: Username or email.
             password: The account password.
             device: Label the token is filed under in the user's account page. Defaults to
-                ``"siar-scanner (<hostname>)"`` so a user with several machines can tell their
+                ``"siar-app (<hostname>)"`` so a user with several machines can tell their
                 tokens apart and revoke one.
 
         Returns:
@@ -144,7 +156,7 @@ class Client:
         Raises:
             AuthError: Bad credentials, disabled account, unverified email, or IP lockout.
         """
-        label = device or f"siar-scanner ({socket.gethostname()})"
+        label = device or f"siar-app ({socket.gethostname()})"
         res = self._request(
             "/api/idapi/login.php",
             method="POST",
@@ -179,12 +191,19 @@ class Client:
             r["local_platform"] = local
         return rows
 
-    def bundle(self, slug: str, platform_tag: str | None = None) -> bytes:
+    def bundle(
+        self,
+        slug: str,
+        platform_tag: str | None = None,
+        *,
+        on_progress: Callable[[int, int | None], None] | None = None,
+    ) -> bytes:
         """Download one algorithm build's bundle zip.
 
         Args:
             slug: The algorithm slug.
             platform_tag: Which build; defaults to this machine's tag.
+            on_progress: Called as ``(bytes_so_far, total_or_None)`` as the zip arrives.
 
         Returns:
             The zip bytes.
@@ -196,7 +215,71 @@ class Client:
         query = urllib.parse.urlencode(
             {"slug": slug, "platform": platform_tag or default_platform_tag()}
         )
-        return self._request(f"/api/idapi/scanner_get.php?{query}", raw=True)
+        return self._request(
+            f"/api/idapi/scanner_get.php?{query}", raw=True, on_progress=on_progress
+        )
+
+
+    def send_feedback(self, slug: str, score: int, *, version: str = "",
+                      comment: str = "", platform: str = "") -> dict:
+        """Rate how an algorithm performed, 0-9.
+
+        Args:
+            slug: The algorithm rated.
+            score: 0-9, where 0 is "found nothing useful".
+            version: Which build is being rated. Defaults server-side to the one currently
+                published, but the CLI sends the installed one — that is the build whose
+                output the user is actually reacting to.
+            comment: Optional sentence.
+            platform: The rater's build tag, for telling a bad port from a bad algorithm.
+
+        Returns:
+            The server's response, including ``build`` and ``algorithm`` rating totals.
+        """
+        return self._request(
+            "/api/idapi/scanner_feedback.php",
+            method="POST",
+            body={
+                "slug": slug,
+                "score": int(score),
+                "version": version,
+                "comment": comment,
+                "platform": platform,
+            },
+        )
+
+    def my_feedback(self) -> list[dict]:
+        """Every rating this account has given, newest first."""
+        res = self._request("/api/idapi/scanner_feedback.php?mine=1")
+        rows = res.get("feedback") if isinstance(res, dict) else None
+        return rows if isinstance(rows, list) else []
+
+
+def _read_reporting(resp: Any, on_progress: Callable[[int, int | None], None]) -> bytes:
+    """Read a response body in chunks, reporting progress as it goes.
+
+    ``Content-Length`` is what the bar needs and ``scanner_get.php`` always sends it, but a
+    proxy that re-encodes the response may not, so the total is optional the whole way down
+    and the caller renders bytes-so-far when it is missing. The first call is made before any
+    bytes arrive, so something appears on screen while the server is still decrypting.
+    """
+    raw_total = resp.headers.get("Content-Length")
+    try:
+        total: int | None = int(raw_total) if raw_total else None
+    except (TypeError, ValueError):
+        total = None
+
+    on_progress(0, total)
+    chunks: list[bytes] = []
+    done = 0
+    while True:
+        chunk = resp.read(_CHUNK)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        done += len(chunk)
+        on_progress(done, total)
+    return b"".join(chunks)
 
 
 def _error_detail(e: urllib.error.HTTPError) -> tuple[str, str]:
@@ -228,6 +311,6 @@ def client_from_credentials(base_url: str | None = None) -> Client:
     token = creds.get("token")
     if not token:
         raise AuthError(
-            "not signed in — run `siar-scanner login`, or set $SIAR_SCANNER_TOKEN"
+            "not signed in — run `siar-app login`, or set $SIAR_APP_TOKEN"
         )
     return Client(base_url or creds.get("base_url") or DEFAULT_BASE_URL, token)

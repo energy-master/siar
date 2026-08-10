@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from siarscan.dsp.windows import by_name
+from siarapp.dsp.windows import by_name
 
 __all__ = ["StftResult", "stft", "frame_count", "grid_bytes"]
 
@@ -93,7 +93,7 @@ def stft(
         signal: 1-D real signal (any float dtype; converted to float64 for the transform).
         fft_size: Power-of-two FFT size, e.g. 1024.
         hop_size: Hop in samples, ``1 <= hop_size <= fft_size``.
-        window_name: See :mod:`siarscan.dsp.windows`.
+        window_name: See :mod:`siarapp.dsp.windows`.
 
     Returns:
         The :class:`StftResult`. A signal shorter than one window yields ``frames == 0`` and an

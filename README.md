@@ -1,4 +1,6 @@
-# siar-scanner
+# siar-app
+
+**SIaR — Signal Information and Reconnaissance.** Part of [goident.ai](https://goident.ai).
 
 Run the IDent Dynamics structure scanners over a folder of recordings, on your own machine.
 
@@ -17,19 +19,22 @@ happened around 4 seconds".
 ## Install
 
 ```bash
-pip install git+https://github.com/energy-master/siar-scanner.git
+pip install git+https://github.com/energy-master/siar-app.git
 ```
 
 Requires Python ≥ 3.11. Runs on CPU. Pulls in numpy and soundfile, and nothing else.
+
+The first command you run shows the MIT licence and asks you to accept it, once. See
+[Licence](#licence).
 
 ## Quick start
 
 Three commands. Sign in, see what you can run, run it.
 
 ```bash
-siar-scanner login                                    # your IDent Dynamics account
-siar-scanner algorithms                               # what your account can download
-siar-scanner run ~/survey-audio -a all_structures -o ~/survey-scan
+siar-app login                                    # your IDent Dynamics account
+siar-app algorithms                               # what your account can download
+siar-app run ~/survey-audio -a all_structures -o ~/survey-scan
 ```
 
 Then open `~/survey-scan` in IDent Dynamics — **Open folder** in the app — and work through
@@ -48,29 +53,29 @@ The scanning algorithms live in your IDent Dynamics installation, not in this pa
 them with the same username and password you use for the web app.
 
 ```bash
-$ siar-scanner login
+$ siar-app login
 IDent Dynamics username or email: rahul@vixenintelligence.com
 Password:
 Signed in to https://goident.ai as rahul.
-Token saved to /home/you/.siar-scanner/credentials.json
+Token saved to /home/you/.siar-app/credentials.json
 ```
 
 The token is cached at mode 0600 and is what every later command uses. In a script or a
 container, skip the prompt entirely:
 
 ```bash
-export SIAR_SCANNER_URL=https://goident.ai
-export SIAR_SCANNER_TOKEN=...      # from a previous login, or your account page
+export SIAR_APP_URL=https://goident.ai
+export SIAR_APP_TOKEN=...      # from a previous login, or your account page
 ```
 
-`siar-scanner whoami` says who you are signed in as; `siar-scanner logout` forgets the token
+`siar-app whoami` says who you are signed in as; `siar-app logout` forgets the token
 locally. Revoking it properly is done from your account page in the app.
 
 ## 2. See what you can run
 
 ```bash
-$ siar-scanner algorithms
-SLUG                      FINDS                  RUNS HERE  DESCRIPTION
+$ siar-app algorithms
+NAME                      FINDS                  RUNS HERE  WHAT IT IS
 ------------------------  ---------------------  ---------  ------------------------------------
 all_structures            sweep, tonal, click,   yes        The survey. Boxes every significant
                           patch, blob                       structure in the recording — tonals,
@@ -92,7 +97,7 @@ what each algorithm is actually being used for, not what it was called when it w
 Add `--params` to see what each one lets you tune:
 
 ```bash
-$ siar-scanner algorithms --params
+$ siar-app algorithms --params
 ...
 all_structures — parameters (--param name=value):
 NAME          TYPE    DEFAULT  MEANING
@@ -104,13 +109,13 @@ fmax          number  null     High edge; null means up to Nyquist.
 ```
 
 **"RUNS HERE" says no?** An obfuscated bundle is pinned to an operating system, a CPU
-architecture and a Python minor version. `siar-scanner version` prints the tag your machine
+architecture and a Python minor version. `siar-app version` prints the tag your machine
 reports; ask whoever publishes the algorithms for a build with that tag.
 
 ## 3. Look at the folder before you scan it
 
 ```bash
-$ siar-scanner scan ~/survey-audio
+$ siar-app scan ~/survey-audio
 412 recording(s) under /home/you/survey-audio
 27.40 h of audio
 
@@ -126,7 +131,7 @@ different bin in each group, and scanning the folder as one thing is really scan
 ## 4. Run a scan
 
 ```bash
-$ siar-scanner run ~/survey-audio --algorithm all_structures --out ~/survey-scan
+$ siar-app run ~/survey-audio --algorithm all_structures --out ~/survey-scan
 algorithm  all_structures (linux-x86_64-cp313)
 scanning   /home/you/survey-audio
 output     /home/you/survey-scan
@@ -140,7 +145,7 @@ Output folder: /home/you/survey-scan
 Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.
 ```
 
-The first run downloads the algorithm and caches it under `~/.siar-scanner/algorithms/`. Every
+The first run downloads the algorithm and caches it under `~/.siar-app/algorithms/`. Every
 run after that is completely offline — useful on a vessel, required in a lab with no network.
 
 Useful flags:
@@ -168,8 +173,14 @@ The output folder mirrors your input folder's layout:
     2025-09-08T1400.wav                copy of your recording
     2025-09-08T1400.structures.json    what the scanner found
     2025-09-08T1400.png                the lane thumbnail
-  siar-scanner-run.json                what was run, and what came back
+  siar-app-run.json                what was run, and what came back
+  siar-app-performance.json        what it cost — see below
 ```
+
+Every sidecar declares the **family** of the model that wrote it, so the app can tell what kind
+of results it is opening rather than guessing from which fields are present. A structure scanner
+and a click detector both emit boxes with the same nine fields; only the family says which is
+which.
 
 In the web app, use **Open folder** and pick `~/survey-scan`. Every recording appears as a lane
 with its spectrogram preview; click one and its boxes are drawn over the surface, counted by
@@ -181,18 +192,318 @@ comes back in one click next time.
 
 ## Command reference
 
-| Command | What it does |
-|---|---|
-| `siar-scanner version` | the package version and this machine's build tag |
-| `siar-scanner login` | sign in and cache a bearer token |
-| `siar-scanner logout` | forget the cached token on this machine |
-| `siar-scanner whoami` | who the cached token belongs to |
-| `siar-scanner algorithms` | the algorithms your account can download |
-| `siar-scanner scan` | summarise a folder from headers alone |
-| `siar-scanner run` | scan a folder and build the output folder |
-| `siar-scanner runs` | what has been run from this machine |
+Eleven commands. Four of them (`version`, `installed`, `scan`, and `run --algorithm-path`) work
+without an account; the rest need a login.
 
-`--help` on any of them prints the full flag list.
+| Command | What it does | Needs a login |
+|---|---|---|
+| [`version`](#siar-app-version) | the package version and this machine's build tag | no |
+| [`license`](#siar-app-license) | show the licence, or accept it without a prompt | no |
+| [`login`](#siar-app-login-username) | sign in and cache a bearer token | — |
+| [`logout`](#siar-app-logout) | forget the cached token on this machine | no |
+| [`whoami`](#siar-app-whoami) | who the cached token belongs to | reads the cache |
+| [`algorithms`](#siar-lib-algorithms) | the algorithms your account can download | yes |
+| [`installed`](#siar-app-installed) | the algorithms on **this machine**, and their versions | no |
+| [`scan`](#siar-app-scan-folder) | summarise a folder from headers alone | no |
+| [`run`](#siar-app-run-folder---out-dir) | scan a folder and build the output folder | first run only |
+| [`runs`](#siar-app-runs) | what has been run from this machine | no |
+| [`feedback`](#siar-app-feedback-name) | rate how well an algorithm performed, 0-9 | yes |
+
+`--server URL` is accepted by every command that talks to the server, on **either** side of
+the subcommand — `siar-app --server … run` and `siar-app run --server …` both work. You
+normally never pass it: the install you logged in to is remembered.
+
+`--help` on any command prints its flags; `siar-app --version` prints the version and exits.
+With no command at all, it prints the help and exits 0.
+
+Every command prints a two-line banner first:
+
+```
+SIaR · Signal Information and Reconnaissance · goident.ai
+siar-app 0.1.0 · © Vixen Intelligence 2026
+```
+
+It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
+exist to be piped into something, and a banner on stdout would make every one of them emit
+invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
+
+### `siar-app version`
+
+```bash
+$ siar-app version
+siar-app 0.1.0
+platform     linux-x86_64-cp313
+licence      MIT
+© Vixen Intelligence 2026
+```
+
+The platform line is the build tag this machine reports — operating system, CPU architecture and
+Python minor version. It is the first thing to check when a download is refused or an algorithm
+says it does not run here. No flags, no network, no login.
+
+### `siar-app license`
+
+Prints the terms — on stdout, unlike the first-run prompt, since someone who typed `license`
+may want to redirect it — and says whether they have been accepted on this machine.
+
+| Flag | Meaning |
+|---|---|
+| `--accept` | record acceptance and exit, for a script or a container |
+
+See [Licence](#licence) below.
+
+### `siar-app login [USERNAME]`
+
+Exchanges your IDent Dynamics username (or email) and password for a bearer token, cached at
+`~/.siar-app/credentials.json` (mode 0600). The install you sign in to becomes the default
+for every later command, so `--server` is a once-only argument.
+
+| Flag | Meaning |
+|---|---|
+| `USERNAME` | username or email; prompted for if omitted |
+| `--device LABEL` | how this machine is labelled in your account's token list |
+| `--server URL` | which install to sign in to (default: the last one, else `https://goident.ai`) |
+
+The password is read from `$SIAR_APP_PASSWORD` if set, and prompted for otherwise. A shell
+with no interactive input — CI, a pipe, an agent — cannot prompt, so pass the username as an
+argument and set that variable, or skip logging in entirely with `$SIAR_APP_TOKEN`.
+
+### `siar-app logout`
+
+Deletes the cached token from this machine and says so. It does **not** revoke the token
+server-side — a lost laptop is dealt with from your account page in the web app, not here. No
+flags.
+
+### `siar-app whoami`
+
+Prints the user, the server and this machine's platform tag. Exits 1 if there is no cached
+token, so it doubles as a "am I signed in" test in a script.
+
+### `siar-app algorithms`
+
+The catalogue your installation's super user has published. Columns are the name (what you pass
+to `run -a`), what shapes it finds, whether a build exists for this machine, how users have
+[rated](#siar-app-feedback-name) it, and the description — which is written in the admin
+panel, so it says what the algorithm is actually being used for.
+
+| Flag | Meaning |
+|---|---|
+| `--family NAME` | only models in one family (name or title) |
+| `--params` | also print each algorithm's tunable parameters, with types and defaults |
+| `--json` | the raw catalogue, including the `platforms` build tags and `params_schema` |
+| `--server URL` | check a different install |
+
+`RATED` shows the mean score and how many people gave one; `—` means nobody has rated it yet,
+which is deliberately not the same as a low score.
+
+Models are printed **one table per family**. Every SIaR model belongs to exactly one family —
+structure scanners today, click detectors next — and the question people bring to this listing
+is "what have I got for clicks" long before it is "what have I got". The families and their
+order are set by your installation's super user, not by this CLI.
+
+Two footnotes may appear under the table. **"no build for `<tag>`"** means the algorithm exists
+but not for your OS/architecture/Python — ask whoever publishes them for a build. **A `*` beside
+a name** means that model is unpublished and only a super user can see it; ordinary accounts
+are not offered it at all. Marking them matters because a super user's list is otherwise
+indistinguishable from what their users get.
+
+### `siar-app installed`
+
+What is actually on this machine, and at what version. `algorithms` says what the server
+offers; this says what you have — and the two diverge the moment a build is republished.
+
+```bash
+$ siar-app installed
+NAME                      VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE
+------------------------  -------  ------------------  -------  ----------------  ---------
+all_structures            1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18  yes
+
+1 bundle(s), 1.0 MiB in /home/you/.siar-app/algorithms
+```
+
+| Flag | Meaning |
+|---|---|
+| `--check` | also ask the server whether a newer version is published |
+| `--json` | the raw list, including each bundle's path on disk |
+| `--server URL` | which install `--check` asks |
+
+Works offline: it reads each bundle's manifest and never imports one, so it answers even for a
+bundle built for a different machine — which is what `RUNS HERE` is telling you about.
+
+With `--check` a `SERVER` column appears:
+
+```bash
+$ siar-app installed --check
+NAME            VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE  SERVER
+--------------  -------  ------------------  -------  ----------------  ---------  ---------------
+all_structures  1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18  yes        1.1.0 available
+
+`siar-app run --refresh -a <name>` replaces a cached bundle with the newest.
+```
+
+`up to date`, `X.Y.Z available`, `ahead (X.Y.Z published)` — you are running a build newer than
+the catalogue, which happens to whoever publishes them — or `not offered`, meaning the algorithm
+has been withdrawn or your account can no longer see it. Nothing will replace what is cached
+either way; the cache is yours until you refresh it. A `--check` that cannot reach the server
+prints a warning and still gives you the local answer.
+
+### `siar-app scan FOLDER`
+
+Reads headers only — no decode, no algorithm, no login — so a multi-GB corpus is summarised in
+about a second. Prints the recording count, the total duration, and a sample-rate breakdown.
+
+| Flag | Meaning |
+|---|---|
+| `--no-recursive` | only the top level of the folder |
+
+Worth the second before a long run: if the table shows more than one sample rate, every
+frequency band maps to a different bin in each group, and scanning the folder as one thing is
+really scanning several. It says so when that happens.
+
+### `siar-app run FOLDER --out DIR`
+
+The main event. Runs one algorithm over every recording under `FOLDER` and writes an output
+folder holding the audio, one structures sidecar per recording, and a lane thumbnail. `--out` is
+required and must not be the folder being scanned.
+
+**Choosing the algorithm**
+
+| Flag | Meaning |
+|---|---|
+| `--algorithm`, `-a NAME` | which algorithm (see `siar-app algorithms`) |
+| `--algorithm-path DIR` | run an unobfuscated algorithm package straight off disk — development only, needs no login |
+| `--platform TAG` | download the build for another platform tag instead of this machine's |
+| `--refresh` | re-download even if the bundle is already cached |
+| `--server URL` | which install to download from |
+
+**Analysis grid** — defaults come from the algorithm, which carries the grid it was tuned at.
+Override only if you know why.
+
+| Flag | Meaning |
+|---|---|
+| `--fft N` | FFT size, a power of two |
+| `--hop N` | hop in samples (default: `fft/4`) |
+| `--window` | `hann` (default), `hamming`, `blackman`, `rectangular` |
+| `--channel SEL` | `mix` (default), `left`, `right`, or a channel index |
+
+**Algorithm parameters**
+
+| Flag | Meaning |
+|---|---|
+| `--param NAME=VALUE` | set one parameter; repeatable |
+| `--fmin HZ` / `--fmax HZ` | shorthand for the band to scan |
+
+`--param` values are typed by what they look like: `true`/`yes`/`on` and `false`/`no`/`off`
+become booleans, `null`/`none`/empty becomes null, digits become an int or a float, and anything
+else stays a string. An algorithm that wanted a float should not receive `"2.5"`.
+
+**Output**
+
+| Flag | Meaning |
+|---|---|
+| `--resume` | skip recordings already written to the output folder |
+| `--link` | hardlink the audio instead of copying it (same filesystem only) |
+| `--no-thumbnails` | skip the per-recording lane previews |
+| `--limit N` | stop after N recordings — a trial run over a big corpus |
+| `--no-recursive` | only the top level of the folder |
+| `--quiet`, `-q` | no per-file progress |
+
+The first run of an algorithm downloads it, and says so with a bar:
+
+```
+downloading all_structures  [██████████████████░░░░░░]  73%  256.0 KiB / 349.4 KiB
+```
+
+Off a terminal — a log, a CI job — it announces the download once and reports the total when it
+lands, rather than redrawing a line nobody is watching. A cached algorithm prints nothing at
+all, because nothing is being waited for. `--quiet` suppresses it along with the per-file
+progress.
+
+Exits 1 if any recording errored, so a scripted survey can tell a partial run from a clean one.
+Ctrl-C exits 130 and leaves a usable folder — `--resume` picks it up, and a fully-resumed run
+says "nothing to do" rather than reporting zero structures like a failure.
+
+### `siar-app runs`
+
+Every scan run from this machine, newest first — when, which algorithm, how many files, how many
+structures, and the output folder. Read from `~/.siar-app/runs.json`; local history, not an
+account-wide one.
+
+```bash
+$ siar-app runs --limit 3
+WHEN                  ALGORITHM       FILES  FOUND  OUTPUT
+--------------------  --------------  -----  -----  --------------------
+2026-08-10T11:26:00Z  all_structures      3     11  /home/you/survey-scan
+```
+
+| Flag | Meaning |
+|---|---|
+| `--limit N` | how many to show (default 20) |
+| `--json` | the raw history |
+
+### `siar-app feedback NAME`
+
+Rate how well an algorithm did on *your* recordings, 0 to 9. This is the only channel the
+people who publish these have for finding out whether a scanner works on water they have never
+recorded, so it is worth the ten seconds.
+
+```bash
+$ siar-app feedback all_structures --score 7 -m "found the sweeps, missed two faint tonals"
+Thanks — all_structures 1.1.0 rated 7/9.
+That build now averages 6.7/9 from 3 ratings.
+```
+
+| Flag | Meaning |
+|---|---|
+| `--score`, `-s 0-9` | the rating; prompted for, with a scale, if omitted |
+| `--comment`, `-m TEXT` | a sentence on what it did well or badly |
+| `--mine` | list the ratings you have given instead of adding one |
+| `--server URL` | which install to send it to |
+
+The scale, as the prompt describes it:
+
+| | |
+|---|---|
+| **0-2** | found nothing useful, or buried the recording in false boxes |
+| **3-5** | usable, but needed a lot of sorting through |
+| **6-7** | found what was there, with some noise |
+| **8-9** | found what was there and little else |
+
+Two things about how a rating is stored. It is filed against the version **installed on this
+machine**, not the newest one published — you are judging output that a particular build
+produced, and a bumped version starts with a clean sheet rather than inheriting its
+predecessor's reputation. And one rating per person per build is kept: rating something again
+replaces your previous answer, comment included, so re-rating without `-m` clears the sentence
+you left last time.
+
+## Environment and files
+
+Everything lives under one directory, and one variable moves it — which is what a shared or
+containerised install needs.
+
+| Variable | Effect |
+|---|---|
+| `SIAR_APP_HOME` | where everything is kept (default `~/.siar-app`) |
+| `SIAR_APP_TOKEN` | use this bearer token, ignoring the credentials file |
+| `SIAR_APP_URL` | talk to this install, ignoring the credentials file |
+| `SIAR_APP_PASSWORD` | read by `login` instead of prompting |
+| `SIAR_APP_ACCEPT_LICENSE` | accept the licence without a prompt (containers, CI) |
+| `SIAR_APP_NO_BANNER` | suppress the two-line banner on stderr |
+
+```
+~/.siar-app/
+  credentials.json              server, username and token (mode 0600)
+  license.json                  that you accepted the licence, and when
+  runs.json                     what `siar-app runs` lists
+  algorithms/<name>/<platform>/ unpacked bundles, one tree per build
+```
+
+The token pair is the whole non-interactive story: set `SIAR_APP_TOKEN` and
+`SIAR_APP_URL` and no command ever needs to prompt or write a file.
+
+**Exit codes.** 0 on success, 1 on a handled failure — a bad folder, an expired token, a run
+with errors in it — and 130 on Ctrl-C. Expected failures print one sentence to stderr, not a
+traceback.
 
 ## What is in the output
 
@@ -224,9 +535,18 @@ Nine fields are the contract and can be relied on: `tmin`, `tmax`, `fmin`, `fmax
 `cells`, `peakSigma`, `confidence`, `shape`. An algorithm may add its own diagnostics alongside
 them, and those are written down as it gave them.
 
-`siar-scanner-run.json` records the algorithm, the grid, the parameters, and one row per
+`siar-app-run.json` records the algorithm, the grid, the parameters, and one row per
 recording with its status, its structure count and its per-shape breakdown — including the rows
 that failed and why.
+
+`siar-app-performance.json` records what the run cost: per file and in total, the audio
+duration, the wall time, and the **realtime factor** — 3.7 means the scan ran 3.7 times faster
+than the audio it scanned, so an hour of recording took sixteen minutes. It also records the
+machine, because a factor with no machine attached is close to meaningless: the same scan is 8x
+on a workstation and 0.9x on a vessel laptop. Two times are kept, and the gap between them is
+the answer to "why is this slower than the sum of its parts" — `wall_sec` includes decoding,
+thumbnails and writing, while `scan_sec` is the algorithm alone. Opening the folder in IDent
+Dynamics pops up a **Performance** panel showing all of it.
 
 ## Notes
 
@@ -244,6 +564,26 @@ sees inside them. That is a deterrent paired with your licence terms, not a cryp
 guarantee. Your audio never leaves your machine either way — the only thing this tool sends is
 your login.
 
+## Licence
+
+This command line is **MIT** — see [`LICENSE`](LICENSE).
+
+The first command that does any work shows the terms and asks you to accept them. **Once.** The
+answer is recorded in `~/.siar-app/license.json` and you are never asked again; delete that
+file and you will be. A shell that cannot prompt — CI, a container, an agent — is not accepted
+for silently: it is told to run `siar-app license --accept` once, or to set
+`$SIAR_APP_ACCEPT_LICENSE`. Declining exits 1 and runs nothing.
+
+`version` and `license` are the only commands that work before acceptance, because gating either
+would be a licence you have to accept before you may read it.
+
+**What MIT does and does not cover.** It covers this package: the CLI, the decoder, the STFT,
+the output-folder format. It does **not** cover the scanning algorithms — those are proprietary,
+are not distributed with this package, and are licensed separately by the IDent Dynamics
+installation you sign in to.
+
 ---
 
-© Vixen Intelligence, 2026. Proprietary.
+SIaR — Signal Information and Reconnaissance · [goident.ai](https://goident.ai)
+
+© Vixen Intelligence, 2026.

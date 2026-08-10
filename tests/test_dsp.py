@@ -12,8 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from siarscan.dsp.stft import frame_count, grid_bytes, stft
-from siarscan.dsp.windows import blackman, by_name, hamming, hann, rectangular
+from siarapp.dsp.stft import frame_count, grid_bytes, stft
+from siarapp.dsp.windows import blackman, by_name, hamming, hann, rectangular
 
 
 def test_hann_is_symmetric_not_periodic():
@@ -87,11 +87,11 @@ def test_blocking_does_not_change_the_answer():
     """The transform runs in blocks to bound peak memory; crossing a block boundary must be
     invisible. Checked by comparing a signal long enough to span several blocks against the
     same frames computed one at a time."""
-    # import_module, not `import siarscan.dsp.stft as ...`: the package re-exports the
+    # import_module, not `import siarapp.dsp.stft as ...`: the package re-exports the
     # function under that name, so attribute lookup would hand back the callable.
     from importlib import import_module
 
-    stft_mod = import_module("siarscan.dsp.stft")
+    stft_mod = import_module("siarapp.dsp.stft")
 
     rng = np.random.default_rng(11)
     signal = rng.standard_normal(64 * 1200 + 256).astype(np.float32)

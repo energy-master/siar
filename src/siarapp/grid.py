@@ -201,7 +201,7 @@ class ScannerAlgorithm:
             default STFT for this algorithm, so a scanner tuned to a 1 ms click gets its short
             window without the user having to know.
         params_schema: ``{name: {"type", "default", "min", "max", "help"}}`` — what ``--param``
-            may set. Drives ``siar-scanner algorithms --params``.
+            may set. Drives ``siar-app algorithms --params``.
     """
 
     slug: str = "algorithm"

@@ -15,10 +15,10 @@ import os
 import numpy as np
 import pytest
 
-from siarscan.grid import Region, ScannerError, normalise_regions
-from siarscan.io.output import SIDECAR_SUFFIX, OutputFolder, sidecar_document
-from siarscan.viz.png import encode_png
-from siarscan.viz.thumbnail import render_rgb, thumbnail_png
+from siarapp.grid import Region, ScannerError, normalise_regions
+from siarapp.io.output import SIDECAR_SUFFIX, OutputFolder, sidecar_document
+from siarapp.viz.png import encode_png
+from siarapp.viz.thumbnail import render_rgb, thumbnail_png
 
 
 @pytest.fixture()
@@ -166,7 +166,7 @@ def test_png_is_a_png():
 def test_viridis_matches_the_browsers_polynomial():
     """Not matplotlib's table: the app evaluates a polynomial fit, and the two differ by a few
     LSB. A lane rendered here sits next to one rendered by the browser."""
-    from siarscan.viz.colormap import viridis_lut
+    from siarapp.viz.colormap import viridis_lut
 
     assert viridis_lut.shape == (256, 3)
     # Anchors dumped from the app's own buildLut('viridis') under node. matplotlib's viridis

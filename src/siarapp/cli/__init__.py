@@ -6,7 +6,7 @@ __all__ = ["main"]
 
 
 def main(argv=None) -> int:
-    """Run the CLI. Imported lazily so ``import siarscan.cli`` stays cheap."""
-    from siarscan.cli.main import main as _main
+    """Run the CLI. Imported lazily so ``import siarapp.cli`` stays cheap."""
+    from siarapp.cli.main import main as _main
 
     return _main(argv)

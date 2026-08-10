@@ -2,7 +2,7 @@
 """Reading recordings in and writing the output folder out."""
 from __future__ import annotations
 
-from siarscan.io.audio import (
+from siarapp.io.audio import (
     AudioInfo,
     Recording,
     find_recordings,
@@ -11,7 +11,7 @@ from siarscan.io.audio import (
     probe,
     to_mono,
 )
-from siarscan.io.output import OutputFolder, sidecar_document
+from siarapp.io.output import OutputFolder, sidecar_document
 
 __all__ = [
     "AudioInfo",

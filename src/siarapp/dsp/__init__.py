@@ -6,7 +6,7 @@ Ports of the web app's ``js/dsp/{windows,stft}.js``. See those modules' docstrin
 """
 from __future__ import annotations
 
-from siarscan.dsp.stft import StftResult, frame_count, grid_bytes, stft
-from siarscan.dsp.windows import WINDOWS, by_name
+from siarapp.dsp.stft import StftResult, frame_count, grid_bytes, stft
+from siarapp.dsp.windows import WINDOWS, by_name
 
 __all__ = ["StftResult", "stft", "frame_count", "grid_bytes", "WINDOWS", "by_name"]
