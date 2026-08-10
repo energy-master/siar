@@ -329,23 +329,44 @@ def _progress(done: int, total: int, result) -> None:
         print()
 
 
+def _duration(seconds: float) -> str:
+    """A duration a human reads at a glance.
+
+    Hours for a survey, minutes for a session, seconds for a handful of clips. Always printing
+    hours makes a twelve-second trial run report "0.00 h of audio", which reads like a failure.
+    """
+    if seconds >= 3600:
+        return f"{seconds / 3600:.2f} h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds:.1f} s"
+
+
 def _print_summary(manifest: dict, out_root: str) -> None:
     """The closing report: what was found, and what to do with it."""
     by_status = manifest["by_status"]
+    scanned = by_status.get("scanned", 0)
     print()
-    print(
-        f"{manifest['files']} file(s), "
-        f"{manifest['audio_sec'] / 3600:.2f} h of audio, "
-        f"in {manifest['elapsed_sec']:.1f}s"
-    )
-    if manifest["shapes"]:
-        found = ", ".join(f"{n} {shape}" for shape, n in manifest["shapes"].items())
-        print(f"{manifest['structures']} structures: {found}")
+
+    # A fully-resumed run scans nothing, and reporting "0.0 s of audio / no structures found"
+    # for it reads like a failure rather than like "there was nothing left to do".
+    if scanned == 0 and by_status.get("skipped"):
+        print(f"Nothing to do — all {by_status['skipped']} file(s) were already scanned.")
+        print("Drop --resume, or delete the output folder, to scan them again.")
     else:
-        print("No structures found.")
-    for status in ("skipped", "too_short", "error"):
-        if by_status.get(status):
-            print(f"{by_status[status]} file(s) {status.replace('_', ' ')}")
+        print(
+            f"{manifest['files']} file(s), "
+            f"{_duration(manifest['audio_sec'])} of audio, "
+            f"in {manifest['elapsed_sec']:.1f}s"
+        )
+        if manifest["shapes"]:
+            found = ", ".join(f"{n} {shape}" for shape, n in manifest["shapes"].items())
+            print(f"{manifest['structures']} structures: {found}")
+        else:
+            print("No structures found.")
+        for status in ("skipped", "too_short", "error"):
+            if by_status.get(status):
+                print(f"{by_status[status]} file(s) {status.replace('_', ' ')}")
     print()
     print(f"Output folder: {out_root}")
     print("Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.")
@@ -402,7 +423,7 @@ def cmd_scan(args: Namespace) -> int:
         rates[i.sample_rate] = rates.get(i.sample_rate, 0) + 1
 
     print(f"{len(files)} recording(s) under {root}")
-    print(f"{total_sec / 3600:.2f} h of audio")
+    print(f"{_duration(total_sec)} of audio")
     if unreadable:
         print(f"{unreadable} file(s) could not be read")
     print()
