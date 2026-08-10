@@ -1,0 +1,211 @@
+# Vixen Intelligence c.2026
+"""The workspace at ``~/.siar-scanner`` — credentials, the algorithm cache, run history.
+
+One directory, three things in it, and a clear rule about which of them may be deleted: all of
+them. Credentials cost a re-login, the cache costs a re-download, the history is a convenience.
+Nothing here is the product of a scan — that goes in the output folder the user names.
+
+```
+~/.siar-scanner/
+  credentials.json           the bearer token, mode 0600
+  algorithms/<slug>/<platform>/   unpacked bundles, one tree per build
+  runs.json                  the last RUN_HISTORY_MAX runs, for `siar-scanner runs`
+```
+
+``$SIAR_SCANNER_HOME`` moves the lot, which is what a shared or containerised install needs.
+"""
+from __future__ import annotations
+
+import json
+import os
+import platform
+import sys
+from typing import Any
+
+__all__ = [
+    "DEFAULT_BASE_URL",
+    "RUN_HISTORY_MAX",
+    "algorithm_cache_dir",
+    "clear_credentials",
+    "default_platform_tag",
+    "home",
+    "load_credentials",
+    "platform_compatible",
+    "read_json",
+    "record_run",
+    "run_history",
+    "save_credentials",
+    "write_json",
+]
+
+#: Where the CLI talks to unless ``--server`` or ``$SIAR_SCANNER_URL`` says otherwise.
+DEFAULT_BASE_URL = "https://goident.ai"
+
+#: Runs kept in the local history. Enough to answer "what did I run last week", far short of
+#: turning a convenience file into a database.
+RUN_HISTORY_MAX = 200
+
+
+def home() -> str:
+    """The workspace directory, created if absent.
+
+    Returns:
+        Absolute path — ``$SIAR_SCANNER_HOME`` if set, else ``~/.siar-scanner``.
+    """
+    path = os.environ.get("SIAR_SCANNER_HOME") or os.path.join(
+        os.path.expanduser("~"), ".siar-scanner"
+    )
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return os.path.abspath(path)
+
+
+def algorithm_cache_dir(slug: str, platform_tag: str) -> str:
+    """Where one algorithm build is unpacked. Created if absent."""
+    path = os.path.join(home(), "algorithms", _safe(slug), _safe(platform_tag))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _safe(name: str) -> str:
+    """A filesystem-safe slug — a registry name should never escape the cache directory."""
+    return "".join(c if (c.isalnum() or c in "._-") else "_" for c in str(name)) or "unnamed"
+
+
+# -- small JSON helpers ------------------------------------------------------------------
+
+
+def read_json(path: str, default: Any = None) -> Any:
+    """Read a JSON file, returning ``default`` if it is missing or unreadable."""
+    try:
+        with open(path, "rb") as fh:
+            return json.loads(fh.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path: str, payload: Any, *, mode: int | None = None) -> None:
+    """Write JSON atomically, optionally chmod-ing the result.
+
+    Atomically because a half-written ``credentials.json`` locks the user out of their own CLI
+    with a parse error, and the fix ("delete this file") is not discoverable.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+# -- credentials -------------------------------------------------------------------------
+
+
+def _credentials_path() -> str:
+    return os.path.join(home(), "credentials.json")
+
+
+def load_credentials() -> dict:
+    """The saved login, or ``{}``.
+
+    ``$SIAR_SCANNER_TOKEN`` and ``$SIAR_SCANNER_URL`` override the file, so a CI job or a
+    container can run without ``siar-scanner login`` ever having been called.
+
+    Returns:
+        ``{"base_url": ..., "token": ..., "username": ...}`` — possibly partial.
+    """
+    creds = dict(read_json(_credentials_path(), {}) or {})
+    if os.environ.get("SIAR_SCANNER_TOKEN"):
+        creds["token"] = os.environ["SIAR_SCANNER_TOKEN"]
+    if os.environ.get("SIAR_SCANNER_URL"):
+        creds["base_url"] = os.environ["SIAR_SCANNER_URL"]
+    creds.setdefault("base_url", DEFAULT_BASE_URL)
+    return creds
+
+
+def save_credentials(base_url: str, token: str, username: str = "") -> str:
+    """Persist a token at mode 0600.
+
+    Args:
+        base_url: The IDent Dynamics install the token is for.
+        token: The bearer token.
+        username: Who it belongs to, for the ``login`` confirmation and ``runs`` listing.
+
+    Returns:
+        The path written.
+    """
+    path = _credentials_path()
+    write_json(
+        path,
+        {"base_url": base_url.rstrip("/"), "token": token, "username": username},
+        mode=0o600,
+    )
+    return path
+
+
+def clear_credentials() -> bool:
+    """Delete the saved token. Returns True if there was one."""
+    try:
+        os.unlink(_credentials_path())
+        return True
+    except OSError:
+        return False
+
+
+# -- platform tags -----------------------------------------------------------------------
+
+
+def default_platform_tag() -> str:
+    """This machine's build tag, e.g. ``"linux-x86_64-cp313"``.
+
+    An obfuscated bundle's runtime is pinned to OS + CPU architecture + Python minor version, so
+    a build is only ever runnable on machines reporting this same string. Computed identically
+    to the IDent Dynamics SDK's ``default_platform_tag`` and to the publisher's build script —
+    if these three ever disagree, downloads silently stop matching.
+
+    Returns:
+        ``"<system>-<machine>-cp<major><minor>"``, lowercased.
+    """
+    system = (platform.system() or "any").lower()
+    machine = (platform.machine() or "any").lower()
+    return f"{system}-{machine}-cp{sys.version_info[0]}{sys.version_info[1]}"
+
+
+def platform_compatible(build_tag: str | None, local_tag: str | None = None) -> bool:
+    """Whether a build tagged ``build_tag`` can run on ``local_tag`` (default: this machine).
+
+    An empty or ``"any"`` tag is treated as portable — pure-Python bundles exist and refusing
+    them for lack of a tag would be wrong.
+    """
+    build = (build_tag or "").strip().lower()
+    if not build or build == "any":
+        return True
+    return build == (local_tag or default_platform_tag()).strip().lower()
+
+
+# -- run history -------------------------------------------------------------------------
+
+
+def _runs_path() -> str:
+    return os.path.join(home(), "runs.json")
+
+
+def run_history() -> list[dict]:
+    """The recorded runs, newest first."""
+    rows = read_json(_runs_path(), []) or []
+    return rows if isinstance(rows, list) else []
+
+
+def record_run(entry: dict) -> None:
+    """Prepend one run to the history, trimming to :data:`RUN_HISTORY_MAX`.
+
+    Best-effort: a workspace on a read-only or full filesystem must not fail a scan that has
+    already written its real output.
+    """
+    try:
+        rows = run_history()
+        rows.insert(0, entry)
+        write_json(_runs_path(), rows[:RUN_HISTORY_MAX])
+    except OSError:
+        pass

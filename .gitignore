@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Never commit an algorithm bundle or an unpacked one — obfuscated or not, they are
+# the product, not the packaging.
+algorithms/
+*.rkey
+pyarmor_runtime*/
+
+# Local scan output and cached credentials.
+/out/
+/scratch/
+credentials.json
