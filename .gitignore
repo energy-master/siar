@@ -17,3 +17,8 @@ pyarmor_runtime*/
 /out/
 /scratch/
 credentials.json
+
+# Working notes for AI coding assistants. Local only — never published.
+CLAUDE.md
+**/CLAUDE.md
+.claude/
