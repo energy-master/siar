@@ -19,7 +19,7 @@ happened around 4 seconds".
 ## Install
 
 ```bash
-uv tool install --python 3.13 git+https://github.com/energy-master/siar-app.git
+uv tool install --python 3.13 git+https://github.com/energy-master/siar.git
 ```
 
 Runs on CPU. Pulls in numpy and soundfile, and nothing else.
@@ -44,7 +44,7 @@ To upgrade later: `uv tool upgrade siar-app`.
 Works, but the 3.13 is then your responsibility:
 
 ```bash
-python3.13 -m pip install git+https://github.com/energy-master/siar-app.git
+python3.13 -m pip install git+https://github.com/energy-master/siar.git
 ```
 
 `pip` will refuse any other version — `requires-python` is pinned to `>=3.13,<3.14` precisely so
