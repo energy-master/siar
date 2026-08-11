@@ -24,8 +24,8 @@ uv tool install --python 3.13 git+https://github.com/energy-master/siar.git
 
 Runs on CPU. Pulls in numpy and soundfile, and nothing else.
 
-**Use `uv`, and let it choose the Python.** The scanning algorithms are downloaded as compiled
-bundles built for CPython **3.13 exactly** — not 3.12, not 3.14. `uv tool install` fetches a
+**Use `uv`, and let it choose the Python.** The scanning algorithms are downloaded as prebuilt
+bundles tied to CPython **3.13 exactly** — not 3.12, not 3.14. `uv tool install` fetches a
 private 3.13 for this tool and keeps it isolated, so the CLI works whatever Python your system
 happens to have and whatever you upgrade to later. Installing with `pip` under the wrong
 interpreter produces a CLI that runs, signs in, and then finds no algorithm it can load.
