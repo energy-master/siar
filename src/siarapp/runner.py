@@ -222,6 +222,7 @@ def run_folder(
     options: RunOptions | None = None,
     *,
     progress: Callable[[int, int, FileResult], None] | None = None,
+    on_start: Callable[[int, int, str, float], None] | None = None,
     warn: Callable[[str], None] | None = None,
 ) -> dict:
     """Scan every recording under ``source_root`` and build the output folder.
@@ -232,6 +233,12 @@ def run_folder(
         out_root: Where to write the output folder.
         options: See :class:`RunOptions`.
         progress: Called ``(done, total, result)`` after each recording.
+        on_start: Called ``(index, total, rel_path, duration_sec)`` *before* each recording is
+            decoded. The pair exists because one recording is not a quick step: nearly all of
+            its time is spent inside the algorithm's ``scan``, which is a single opaque call,
+            so a caller told only about completions has nothing to say for the whole of it.
+            ``duration_sec`` comes from the header probe already done above, and is ``0.0``
+            for a file whose header would not read.
         warn: Called with one-line warnings (mixed sample rates, oversized grids).
 
     Returns:
@@ -273,6 +280,8 @@ def run_folder(
     next_flush_at = 0.0
 
     for i, path in enumerate(files, start=1):
+        if on_start is not None:
+            on_start(i, len(files), out.rel_path(path), durations[i - 1])
         result = _run_one_file(handle, path, out, plan, options)
         results.append(result)
         audio_done += durations[i - 1]

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from argparse import Namespace
 from typing import Any
@@ -648,16 +649,22 @@ def cmd_run(args: Namespace) -> int:
     print(f"output     {out_root}")
 
     started = time.time()
+    reporter = ScanReporter()
     try:
         manifest = run_folder(
             handle, source, out_root, options,
-            progress=None if args.quiet else _progress,
+            progress=None if args.quiet else reporter.on_result,
+            on_start=None if args.quiet else reporter.on_start,
             warn=lambda m: print(f"warning: {m}", file=sys.stderr),
         )
     except FileNotFoundError as e:
         return _err(str(e))
     except (ValueError, ScannerError) as e:
         return _err(str(e))
+    finally:
+        # Before anything else prints — a summary, an error, a traceback — the ticker has to
+        # stop owning the last line, or it redraws over whatever comes next.
+        reporter.close()
 
     _print_summary(manifest, out_root)
     record_run({
@@ -772,22 +779,124 @@ def _coerce(raw: str):
         return raw
 
 
-def _progress(done: int, total: int, result) -> None:
-    """One line per recording, overwritten in place when the terminal allows it."""
-    tail = {
-        "scanned": f"{result.count} structure{'' if result.count == 1 else 's'}",
-        "skipped": "skipped (already done)",
-        "too_short": "too short to scan",
-        "error": f"ERROR — {result.error}",
-    }.get(result.status, result.status)
-    line = f"[{done}/{total}] {result.rel_path}: {tail}"
-    # Errors stay on screen; everything else may be overwritten by the next file.
-    if result.status == "error" or not sys.stdout.isatty():
-        print(line)
-        return
-    print(f"\r\033[K{line}", end="", flush=True)
-    if done == total:
-        print()
+#: How often the live line redraws. Fast enough to read as a clock rather than a slideshow,
+#: slow enough that a ten-hour survey does not spend its life writing to a terminal.
+_TICK_SEC = 0.2
+
+#: The estimate never draws past this. A bar that reaches 100% and then keeps going has told the
+#: user the wrong thing twice; one that waits at 99% has only ever said "nearly", which is true.
+_BAR_CAP = 99.0
+
+
+class ScanReporter:
+    """The live per-recording line, and the estimate behind its bar.
+
+    Nearly all of a recording's time — measured at 94% on a five-minute file — is spent inside
+    the algorithm's ``scan``, which is one opaque call into an obfuscated bundle with nowhere to
+    report from. So there is no true completion fraction to draw, and the two honest things to
+    show are the ones here: elapsed time, which is a fact, and an estimate clearly presented as
+    one.
+
+    The estimate is throughput learned from this run: seconds of wall time per second of audio,
+    averaged over the recordings already scanned, applied to the current recording's duration
+    from the header probe. It needs no knowledge of the algorithm and costs nothing, and it is
+    wrong in exactly the ways an average is — an unusually dense recording sits at the cap for a
+    while. Nothing is drawn before the first recording finishes, because until then there is no
+    throughput to speak of and a bar would be invention rather than estimate.
+
+    Off a terminal — a log, a pipe, a CI job — no live line is drawn at all. Redrawing in place
+    depends on the cursor going back, and without that every tick becomes another line.
+    """
+
+    def __init__(self) -> None:
+        self._tty = sys.stdout.isatty()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        # Learned throughput: wall seconds spent per second of audio.
+        self._audio_sec = 0.0
+        self._wall_sec = 0.0
+        self._current: tuple[int, int, str, float] | None = None
+        self._started_at = 0.0
+
+    # -- the two callbacks run_folder wants ------------------------------------------------
+
+    def on_start(self, index: int, total: int, rel_path: str, duration_sec: float) -> None:
+        """Begin reporting on a recording."""
+        if not self._tty:
+            return
+        with self._lock:
+            self._current = (index, total, rel_path, duration_sec)
+            self._started_at = time.time()
+        if self._thread is None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._tick, daemon=True)
+            self._thread.start()
+
+    def on_result(self, done: int, total: int, result) -> None:
+        """Finish a recording: learn from it, then print its permanent line."""
+        if result.status == "scanned" and result.duration_sec and result.elapsed_sec:
+            self._audio_sec += float(result.duration_sec)
+            self._wall_sec += float(result.elapsed_sec)
+
+        tail = {
+            "scanned": f"{result.count} structure{'' if result.count == 1 else 's'}",
+            "skipped": "skipped (already done)",
+            "too_short": "too short to scan",
+            "error": f"ERROR — {result.error}",
+        }.get(result.status, result.status)
+        line = f"[{done}/{total}] {result.rel_path}: {tail}"
+
+        with self._lock:
+            self._current = None
+            # Errors stay on screen; everything else may be overwritten by the next recording.
+            if result.status == "error" or not self._tty:
+                if self._tty:
+                    print("\r\033[K", end="")
+                print(line, flush=True)
+            else:
+                print(f"\r\033[K{line}", end="", flush=True)
+                if done == total:
+                    print()
+
+    def close(self) -> None:
+        """Stop the ticker. Safe to call when it never started."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    # -- the live line ---------------------------------------------------------------------
+
+    def _rate(self) -> float | None:
+        """Wall seconds per second of audio, or ``None`` before anything has been scanned."""
+        if self._audio_sec <= 0 or self._wall_sec <= 0:
+            return None
+        return self._wall_sec / self._audio_sec
+
+    def _tick(self) -> None:
+        while not self._stop.wait(_TICK_SEC):
+            with self._lock:
+                current = self._current
+                if current is None:
+                    continue
+                elapsed = time.time() - self._started_at
+                print(f"\r\033[K{self._render(current, elapsed)}", end="", flush=True)
+
+    def _render(self, current: tuple[int, int, str, float], elapsed: float) -> str:
+        index, total, rel_path, duration = current
+        head = f"[{index}/{total}] {rel_path}"
+        rate = self._rate()
+        if rate is None or duration <= 0:
+            # First recording of the run, or a header that would not read: elapsed alone. It
+            # says the run is alive, which is the whole job until there is something to predict.
+            return f"{head}  scanning… {elapsed:.0f}s"
+
+        estimate = duration * rate
+        pct = min(_BAR_CAP, 100.0 * elapsed / estimate) if estimate > 0 else 0.0
+        filled = int(round(_BAR_WIDTH * pct / 100.0))
+        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        return f"{head}  {bar} {pct:2.0f}%  {elapsed:.0f}s of ~{estimate:.0f}s"
 
 
 def _duration(seconds: float) -> str:
