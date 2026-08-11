@@ -7,7 +7,11 @@ name = "siar-app"
 version = "0.1.0"
 description = "Run the IDent Dynamics structure scanners over a folder of recordings"
 readme = "README.md"
-requires-python = ">=3.11"
+# An equality, not a floor. The scanner bundles this CLI downloads are PyArmor-obfuscated, and
+# their bytecode is marshalled by the interpreter that built them — a cp313 bundle runs on 3.13
+# and on no other version. Widening this would let pip install a CLI that can find no algorithm
+# it is able to load. See src/siarapp/config.py's SUPPORTED_PYTHON.
+requires-python = ">=3.13,<3.14"
 authors = [{ name = "Vixen Intelligence" }]
 license = { text = "MIT" }
 keywords = ["acoustics", "sonar", "spectrogram", "detection", "bioacoustics"]

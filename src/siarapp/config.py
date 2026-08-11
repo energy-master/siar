@@ -25,17 +25,21 @@ from typing import Any
 __all__ = [
     "DEFAULT_BASE_URL",
     "RUN_HISTORY_MAX",
+    "SUPPORTED_PYTHON",
     "algorithm_cache_dir",
     "clear_credentials",
     "default_platform_tag",
     "home",
     "legacy_env",
+    "libc_flavour",
     "load_credentials",
     "platform_compatible",
+    "python_supported",
     "read_json",
     "record_run",
     "run_history",
     "save_credentials",
+    "supported_python_text",
     "write_json",
 ]
 
@@ -191,13 +195,27 @@ def clear_credentials() -> bool:
 # -- platform tags -----------------------------------------------------------------------
 
 
+#: The Python this package's algorithm bundles are built for. An obfuscated bundle's bytecode is
+#: marshalled by the interpreter that built it, so this is an equality, not a floor — which is
+#: why ``pyproject.toml`` pins ``>=3.13,<3.14`` rather than ``>=3.13``, and why the recommended
+#: install is ``uv tool install``, which fetches this interpreter instead of using whichever one
+#: the machine happens to have.
+SUPPORTED_PYTHON = (3, 13)
+
+
 def default_platform_tag() -> str:
     """This machine's build tag, e.g. ``"linux-x86_64-cp313"``.
 
     An obfuscated bundle's runtime is pinned to OS + CPU architecture + Python minor version, so
     a build is only ever runnable on machines reporting this same string. Computed identically
-    to the IDent Dynamics SDK's ``default_platform_tag`` and to the publisher's build script —
-    if these three ever disagree, downloads silently stop matching.
+    to the IDent Dynamics SDK's ``default_platform_tag``
+    (``identdynamics/client.py``) and to the publisher's build script
+    (``siar-lib-algorithms/tools/build_and_publish.py``, ``host_platform_tag``) — if these three
+    ever disagree, downloads silently stop matching. Change one, change all three.
+
+    Note:
+        macOS reports ``darwin`` here, never ``macos`` — ``platform.system()`` is ``Darwin``. The
+        tag on Apple silicon is ``darwin-arm64-cp313``.
 
     Returns:
         ``"<system>-<machine>-cp<major><minor>"``, lowercased.
@@ -205,6 +223,40 @@ def default_platform_tag() -> str:
     system = (platform.system() or "any").lower()
     machine = (platform.machine() or "any").lower()
     return f"{system}-{machine}-cp{sys.version_info[0]}{sys.version_info[1]}"
+
+
+def python_supported() -> bool:
+    """Whether this interpreter is the one the published bundles are built for."""
+    return sys.version_info[:2] == SUPPORTED_PYTHON
+
+
+def supported_python_text() -> str:
+    """``"3.13"`` — the Python the bundles are built for, for use in messages."""
+    return f"{SUPPORTED_PYTHON[0]}.{SUPPORTED_PYTHON[1]}"
+
+
+def libc_flavour() -> str:
+    """``"glibc"``, ``"musl"`` or ``""`` off Linux.
+
+    The platform tag cannot carry this: ``platform.system()`` says ``linux`` on Alpine exactly as
+    it does on Debian, so an Alpine machine matches — and downloads — a bundle whose runtime is
+    linked against glibc. That fails at import with a relocation error naming a symbol the reader
+    has no reason to recognise. Detecting it here is what turns that into a sentence.
+    """
+    if platform.system().lower() != "linux":
+        return ""
+    try:
+        name = (platform.libc_ver()[0] or "").lower()
+    except OSError:
+        name = ""
+    if "glibc" in name or name == "libc":
+        return "glibc"
+    if name:
+        return name
+    # libc_ver() reads the executable and comes back empty on musl, so ask the filesystem.
+    import glob
+
+    return "musl" if glob.glob("/lib/ld-musl-*.so.1") else "glibc"
 
 
 def platform_compatible(build_tag: str | None, local_tag: str | None = None) -> bool:

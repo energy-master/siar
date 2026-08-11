@@ -28,6 +28,9 @@ from siarapp.config import (
     DEFAULT_BASE_URL,
     clear_credentials,
     default_platform_tag,
+    libc_flavour,
+    python_supported,
+    supported_python_text,
     home,
     legacy_env,
     load_credentials,
@@ -80,6 +83,15 @@ def cmd_version(_args: Namespace) -> int:
     """
     print(f"siar-app {__version__}")
     print(f"platform     {default_platform_tag()}")
+    py = f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}"
+    if python_supported():
+        print(f"python       {py}")
+    else:
+        print(f"python       {py}  (unsupported: algorithms are built for "
+              f"{supported_python_text()})")
+    libc = libc_flavour()
+    if libc and libc != "glibc":
+        print(f"libc         {libc}  (bundles are built against glibc)")
     print(f"licence      {LICENSE_NAME}" + ("" if license_accepted() else " (not yet accepted)"))
     print(copyright_line())
     return 0

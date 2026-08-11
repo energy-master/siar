@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from siarapp import __version__
 from siarapp.branding import PRODUCT, TAGLINE, print_banner
 from siarapp.cli import commands
+from siarapp.config import python_supported, supported_python_text
 from siarapp.licensing import require_license
 
 __all__ = ["build_parser", "main"]
@@ -222,6 +223,24 @@ _DISPATCH = {
 }
 
 
+def _warn_unsupported_python() -> None:
+    """Say once, early, that this interpreter cannot load any algorithm.
+
+    A warning rather than an exit: ``version`` and ``license`` still work, and a user who has
+    hit this needs to be able to run ``siar-app version`` and paste the result to us. The hard
+    failure belongs where it is real — in the loader, at the point an actual bundle is refused.
+    """
+    if python_supported():
+        return
+    have = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    print(
+        f"warning: this is Python {have}; the scanning algorithms are built for "
+        f"{supported_python_text()} and cannot be loaded here.\n"
+        f"         uv tool install --python {supported_python_text()} siar-app",
+        file=sys.stderr,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point.
 
@@ -243,6 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Banner first, so the licence prompt appears under the name of the thing asking.
     print_banner(__version__)
+    _warn_unsupported_python()
     if args.command not in _UNGATED and not require_license():
         return 1
     try:

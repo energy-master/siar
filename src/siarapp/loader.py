@@ -17,7 +17,10 @@ Two guards exist purely to turn cryptic failures into sentences:
 
 * **Platform check before import.** A bundle is pinned to OS + arch + Python minor. Importing a
   Linux build on a Mac raises something opaque from deep inside the runtime; checking the
-  manifest's tag first lets us say "ask the publisher for a macos-arm64-cp313 build".
+  manifest's tag first lets us say "ask the publisher for a darwin-arm64-cp313 build". (It is
+  ``darwin``, never ``macos`` — the tag is built from ``platform.system().lower()``.) A matching
+  tag on a musl system is checked too, since ``linux`` covers both libc flavours and the tag
+  cannot distinguish them.
 * **Contract check after construction.** An object with no ``scan`` is a build mistake, and it
   should be named as one here rather than as an ``AttributeError`` five hundred files into a run.
 
@@ -41,7 +44,9 @@ from siarapp.config import (
     algorithm_cache_dir,
     default_platform_tag,
     home,
+    libc_flavour,
     platform_compatible,
+    supported_python_text,
 )
 from siarapp.grid import ScannerError
 
@@ -251,16 +256,69 @@ def _construct(module: Any, manifest: dict, slug: str) -> Any:
     return obj
 
 
+def _py_version(cp_tag: str) -> str:
+    """``"cp313"`` -> ``"3.13"``; anything unrecognised comes back unchanged."""
+    digits = cp_tag[2:] if cp_tag.startswith("cp") else ""
+    if len(digits) >= 2 and digits.isdigit():
+        return f"{digits[0]}.{digits[1:]}"
+    return cp_tag
+
+
+def _mismatch_message(slug: str, build_tag: str) -> str:
+    """Explain a platform mismatch in terms of the axis that actually differs.
+
+    The three axes fail for different reasons and have different remedies, and a message that
+    prints both tags and leaves the reader to diff them is the same message for all three. A
+    wrong Python is the common case and the one the user can fix in a single command; a wrong OS
+    or architecture is a request to the publisher.
+
+    Args:
+        slug: The algorithm being loaded.
+        build_tag: The tag the bundle carries.
+
+    Returns:
+        A message naming the mismatched axis and what to do about it.
+    """
+    local = default_platform_tag()
+    b_os, _, rest = build_tag.partition("-")
+    b_arch, _, b_py = rest.rpartition("-")
+    l_os, _, rest = local.partition("-")
+    l_arch, _, l_py = rest.rpartition("-")
+
+    head = f"algorithm {slug!r} is built for {build_tag} but this machine is {local}"
+
+    if (b_os, b_arch) == (l_os, l_arch) and b_py != l_py:
+        return (
+            f"{head}.\n"
+            f"Only the Python version differs: this bundle needs Python {_py_version(b_py)} and "
+            f"this interpreter is {_py_version(l_py)}. An obfuscated bundle's bytecode is "
+            f"produced by the interpreter that built it, so it runs on that version and on no "
+            f"other.\n"
+            f"Reinstall against the Python the algorithms are built for:\n"
+            f"    uv tool install --python {supported_python_text()} siar-app"
+        )
+    return (
+        f"{head} — an obfuscated bundle is pinned to OS, CPU architecture and Python minor "
+        f"version. Ask the publisher for a {local} build, or run it on a matching machine."
+    )
+
+
 def _load_tree(root: str, slug: str, platform_tag: str) -> AlgorithmHandle:
     """Load an already-unpacked bundle tree."""
     manifest = _read_manifest(root)
     build_tag = str(manifest.get("platform") or "").strip()
     if build_tag and not platform_compatible(build_tag):
+        raise ScannerError(_mismatch_message(slug, build_tag))
+    if build_tag and libc_flavour() == "musl":
+        # The tag matched, so the OS, architecture and Python all agree — but "linux" covers
+        # both glibc and musl and the tag cannot say which. Without this the import fails deep
+        # in the dynamic linker, naming a symbol that means nothing to the person reading it.
         raise ScannerError(
-            f"algorithm {slug!r} is built for {build_tag} but this machine is "
-            f"{default_platform_tag()} — an obfuscated bundle is pinned to OS, CPU "
-            f"architecture and Python minor version. Ask the publisher for a "
-            f"{default_platform_tag()} build, or run it on a matching machine."
+            f"algorithm {slug!r} is built for {build_tag}, which matches this machine, but its "
+            f"runtime is linked against glibc and this system uses musl (Alpine). The bundle "
+            f"cannot be loaded here.\n"
+            f"Run siar-app under a glibc image — python:{supported_python_text()}-slim works — "
+            f"or ask the publisher for a musl build."
         )
     pkg_dir = _locate_package(root, str(manifest.get("package") or ""))
     if pkg_dir is None:
