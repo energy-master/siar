@@ -18,6 +18,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from argparse import Namespace
 from typing import Any
 
@@ -62,6 +63,7 @@ __all__ = [
     "cmd_logout",
     "cmd_run",
     "cmd_runs",
+    "cmd_signup",
     "cmd_version",
     "cmd_whoami",
 ]
@@ -138,6 +140,14 @@ _NO_TTY_HELP = (
     "      export SIAR_APP_TOKEN=...  SIAR_APP_URL=..."
 )
 
+#: The same, for signup — where the escape hatch is flags rather than an existing token.
+_NO_TTY_SIGNUP_HELP = (
+    "cannot prompt for account details: this shell has no interactive input.\n"
+    "  Either run `siar-app signup` in a normal terminal, or supply every field:\n"
+    "      siar-app signup --email you@example.com --username you --display-name 'You'\n"
+    "  with $SIAR_APP_PASSWORD set."
+)
+
 
 def cmd_login(args: Namespace) -> int:
     """Exchange IDent Dynamics credentials for a bearer token and save it."""
@@ -165,7 +175,12 @@ def cmd_login(args: Namespace) -> int:
     try:
         res = client.login(login_id, password, device=args.device or "")
     except AuthError as e:
-        return _err(str(e))
+        message = str(e)
+        if e.code == "unauthorized":
+            # Only for wrong-credentials. A disabled or unverified account already *has* a
+            # signup behind it, and telling its owner to make another would be bad advice.
+            message += f"\n  No account on {base_url} yet? Create one: siar-app signup"
+        return _err(message)
     except ApiError as e:
         return _err(str(e))
 
@@ -174,6 +189,71 @@ def cmd_login(args: Namespace) -> int:
     path = save_credentials(base_url, client.token or "", username)
     print(f"Signed in to {base_url} as {username}.")
     print(f"Token saved to {path} (delete it, or run `siar-app logout`, to sign out).")
+    return 0
+
+
+#: Mirrors the server's own rule (``lib/signup.php``), so a typo costs a re-prompt rather than
+#: a round trip. The server still validates — this is courtesy, not the gate.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
+
+
+def cmd_signup(args: Namespace) -> int:
+    """Create an IDent Dynamics account, then point the user at the verification email.
+
+    Deliberately does not sign in afterwards. The account is created unverified, so a login
+    attempt would be refused until the emailed link is used; offering to log in here would
+    only produce a confusing failure a few seconds after a success.
+    """
+    base_url = args.server or load_credentials().get("base_url") or DEFAULT_BASE_URL
+
+    try:
+        email = (args.email or input("Email: ")).strip()
+        if not email:
+            return _err("no email given")
+        if "@" not in email:
+            return _err(f"{email!r} does not look like an email address")
+
+        username = (args.username or input("Username (3-64 chars, letters digits . _ -): ")).strip()
+        if not username:
+            return _err("no username given")
+        if not _USERNAME_RE.match(username):
+            return _err("username must be 3-64 characters: letters, digits, and . _ -")
+
+        display_name = args.display_name
+        if display_name is None:
+            display_name = input("Display name (optional): ").strip()
+    except EOFError:
+        return _err(_NO_TTY_SIGNUP_HELP)
+
+    password = legacy_env("PASSWORD")
+    if not password:
+        try:
+            password = getpass.getpass("Password (8+ characters): ")
+            confirm = getpass.getpass("Confirm password: ")
+        except (EOFError, getpass.GetPassWarning):
+            return _err(_NO_TTY_SIGNUP_HELP)
+        if password != confirm:
+            return _err("the two passwords don't match")
+    if len(password) < 8:
+        return _err("password must be at least 8 characters")
+
+    client = Client(base_url)
+    try:
+        res = client.register(email, username, password, display_name=display_name or "")
+    except ApiError as e:
+        # AuthError too, which register.php returns for "signup is closed on this install" —
+        # not a case where telling the user to log in would help, so it is not special-cased.
+        return _err(str(e))
+
+    user = res.get("user") or {}
+    print(f"Account created on {base_url} as {user.get('username') or username}.")
+    if res.get("verification_sent"):
+        print(f"We've emailed a verification link to {user.get('email') or email}.")
+        print("Click it, then run `siar-app login`.")
+    else:
+        print("The verification email could not be sent. Request another link from")
+        print(f"  {base_url}/resend_verification.php?email={urllib.parse.quote(email)}")
+        print("then run `siar-app login`.")
     return 0
 
 

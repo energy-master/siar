@@ -1,14 +1,18 @@
 # Vixen Intelligence c.2026
 """Talking to an IDent Dynamics install.
 
-Three endpoints, all under ``/api/idapi/`` and all authenticated by a bearer token rather than a
-cookie session:
+All under ``/api/idapi/``, and all bearer-token rather than cookie-session — the two public
+ones because a new customer has no token yet, the rest because a CLI has no browser:
 
-* ``login.php`` — username/email + password in, token out. Delegates to the app's own
+* ``register.php`` (public) — create an account. The headless half of the app's signup form,
+  sharing its validation and its per-IP cap. Hands back no token: the account is unverified
+  until the emailed link is used.
+* ``login.php`` (public) — username/email + password in, token out. Delegates to the app's own
   ``login()``, so lockout, disabled accounts and unverified email all still apply.
 * ``scanner_list.php`` — the published algorithm catalogue: slug, description, shapes, params,
   and which platform builds exist. Any active user sees everything the super has published.
 * ``scanner_get.php`` — one build's bundle, as a zip.
+* ``scanner_feedback.php`` — post a rating for a build, or read back this account's own.
 
 Stdlib ``urllib`` rather than ``requests``, for the reason the PNG encoder is stdlib too: this
 package's dependency list is part of what it is. That costs a little ceremony around errors,
@@ -167,6 +171,50 @@ class Client:
             raise AuthError("the server accepted the login but returned no token")
         self.token = token
         return res
+
+    def register(
+        self,
+        email: str,
+        username: str,
+        password: str,
+        *,
+        display_name: str = "",
+    ) -> dict:
+        """Create an account on this install.
+
+        The headless half of the web app's signup form, and the only endpoint here that is
+        useful without a token. It does not return one: the new account is created unverified
+        and cannot sign in until the emailed link is used, so there is nothing to mint a token
+        for yet. The caller verifies, then calls :meth:`login`.
+
+        Args:
+            email: Where the verification link is sent. Must not already have an account.
+            username: 3-64 characters of letters, digits and ``. _ -``.
+            password: At least 8 characters. Sent once — the confirmation prompt is the CLI's
+                business, and a second copy over the wire proves nothing the first did not.
+            display_name: Optional; the server falls back to the username.
+
+        Returns:
+            ``{"ok", "verification_sent", "user": {...}, "detail"}``. ``verification_sent`` is
+            False when the account exists but the mail did not go out, which is a thing to
+            print rather than a failure — the user can request another link.
+
+        Raises:
+            ApiError: Signup closed on this install, a taken email or username, a malformed
+                field, or the per-IP hourly cap. ``code`` carries which (``"email_taken"``,
+                ``"username_taken"``, ``"weak_password"``, ...) and the message is the
+                server's own sentence.
+        """
+        return self._request(
+            "/api/idapi/register.php",
+            method="POST",
+            body={
+                "email": email,
+                "username": username,
+                "password": password,
+                "display_name": display_name,
+            },
+        )
 
     def algorithms(self) -> list[dict]:
         """The published scanning algorithms this user may download.

@@ -9,6 +9,7 @@ Subcommands:
 
 * ``siar-app version``    — the package version and this machine's build tag.
 * ``siar-app license``    — show the licence, or accept it non-interactively.
+* ``siar-app signup``     — create an IDent Dynamics account.
 * ``siar-app login``      — sign in to IDent Dynamics and cache a token.
 * ``siar-app logout``     — forget the cached token.
 * ``siar-app whoami``     — who the cached token belongs to.
@@ -51,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="siar-app",
         description=f"{PRODUCT} — {TAGLINE}. "
                     "Run the IDent Dynamics structure scanners over a folder of recordings.",
-        epilog="Start with: siar-app login, then siar-app algorithms.",
+        epilog="Start with: siar-app signup (or login if you have an account), "
+               "then siar-app algorithms.",
     )
     parser.add_argument("--version", action="version", version=f"siar-app {__version__}")
     # Accepted on BOTH sides of the subcommand. `siar-app login --server URL` is what
@@ -82,6 +84,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_license.add_argument("--accept", action="store_true",
                            help="record acceptance and exit — for a script or a container")
+
+    p_signup = sub.add_parser(
+        "signup",
+        help="create an IDent Dynamics account",
+        description="Create an account on an IDent Dynamics install — the same self-service "
+        "signup as the web form, without the browser. Every field is prompted for if not "
+        "given. The new account must confirm its email before it can sign in, so this "
+        "command ends by pointing you at that link rather than by logging you in.",
+        epilog="Then: check your email, click the link, and run siar-app login.",
+    )
+    p_signup.add_argument("--email", metavar="ADDRESS",
+                          help="where the verification link is sent (prompted for if omitted)")
+    p_signup.add_argument("--username", metavar="NAME",
+                          help="3-64 characters: letters, digits, and . _ -")
+    p_signup.add_argument("--display-name", metavar="NAME",
+                          help="how your name appears in the app (default: your username). "
+                               "Pass an empty string to accept the default without a prompt")
+    add_server(p_signup)
 
     p_login = sub.add_parser(
         "login",
@@ -211,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
 _DISPATCH = {
     "version": commands.cmd_version,
     "license": commands.cmd_license,
+    "signup": commands.cmd_signup,
     "login": commands.cmd_login,
     "logout": commands.cmd_logout,
     "whoami": commands.cmd_whoami,

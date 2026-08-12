@@ -22,7 +22,7 @@ SOFTWARE.
 
 ---
 
-This licence covers the siar-scanner command line only.
+This licence covers the siar-app command line only.
 
 The scanning algorithms it downloads are proprietary, are not distributed with
 this package, and are licensed separately by the IDent Dynamics installation

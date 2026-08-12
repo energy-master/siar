@@ -36,6 +36,13 @@ If you do not have `uv`:
 curl -LsSf https://astral.sh/uv/install.sh | sh      # macOS / Linux
 ```
 
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
+```
+
+Both install `uv` itself and nothing else; the Python comes later, when `uv tool install` fetches
+the 3.13 this tool needs.
+
 To upgrade later: `uv tool upgrade siar-app`.
 
 <details>
@@ -65,6 +72,8 @@ siar-app algorithms                               # what your account can downlo
 siar-app run ~/survey-audio -a all_structures -o ~/survey-scan
 ```
 
+No IDent Dynamics account yet? `siar-app signup` makes one from here.
+
 Then open `~/survey-scan` in IDent Dynamics — **Open folder** in the app — and work through
 what came back.
 
@@ -79,6 +88,24 @@ if you have a directory of survey recordings, use it.
 
 The scanning algorithms live in your IDent Dynamics installation, not in this package. You get
 them with the same username and password you use for the web app.
+
+No account yet? `siar-app signup` creates one without opening a browser — it is the same
+self-service signup as the web form, and lands you in the same place:
+
+```bash
+$ siar-app signup
+Email: you@example.com
+Username (3-64 chars, letters digits . _ -): you
+Display name (optional): You
+Password (8+ characters):
+Confirm password:
+Account created on https://goident.ai as you.
+We've emailed a verification link to you@example.com.
+Click it, then run `siar-app login`.
+```
+
+It does not sign you in, because it cannot: a new account has to confirm its email address
+before it may sign in at all. Click the link, then:
 
 ```bash
 $ siar-app login
@@ -220,13 +247,14 @@ comes back in one click next time.
 
 ## Command reference
 
-Eleven commands. Four of them (`version`, `installed`, `scan`, and `run --algorithm-path`) work
+Twelve commands. Four of them (`version`, `installed`, `scan`, and `run --algorithm-path`) work
 without an account; the rest need a login.
 
 | Command | What it does | Needs a login |
 |---|---|---|
 | [`version`](#siar-app-version) | the package version and this machine's build tag | no |
 | [`license`](#siar-app-license) | show the licence, or accept it without a prompt | no |
+| [`signup`](#siar-app-signup) | create an IDent Dynamics account | no — it makes one |
 | [`login`](#siar-app-login-username) | sign in and cache a bearer token | — |
 | [`logout`](#siar-app-logout) | forget the cached token on this machine | no |
 | [`whoami`](#siar-app-whoami) | who the cached token belongs to | reads the cache |
@@ -279,6 +307,30 @@ may want to redirect it — and says whether they have been accepted on this mac
 | `--accept` | record acceptance and exit, for a script or a container |
 
 See [Licence](#licence) below.
+
+### `siar-app signup`
+
+Creates an account on an IDent Dynamics install — the headless half of the web app's signup
+form, sharing its validation, its per-IP hourly limit and the account it produces (a plain
+user, 50 MB of storage). Every field is prompted for if not given.
+
+| Flag | Meaning |
+|---|---|
+| `--email ADDRESS` | where the verification link is sent; prompted for if omitted |
+| `--username NAME` | 3-64 characters: letters, digits, and `.` `_` `-` |
+| `--display-name NAME` | how your name appears in the app (default: your username). Pass `''` to take the default without a prompt |
+| `--server URL` | which install to create the account on (default: `https://goident.ai`) |
+
+The password is read from `$SIAR_APP_PASSWORD` if set, and prompted for twice otherwise.
+
+It does **not** log you in afterwards, and that is not an omission: the account is created
+unverified, and `login` would refuse it until the emailed link has been used. So the command
+ends by telling you which address to go and check. If the email never arrives, the account
+still exists — ask for another link from the sign-in page in the web app.
+
+Signup can be switched off installation-wide (`app.allow_signup = false`), in which case this
+command reports that rather than failing obscurely. On an install that is not `goident.ai`,
+pass `--server` — it is not remembered, since nothing is cached until you log in.
 
 ### `siar-app login [USERNAME]`
 
