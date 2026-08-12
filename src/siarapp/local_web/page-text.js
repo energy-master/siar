@@ -70,8 +70,8 @@ licence      MIT (not yet accepted)
 . # The first command that does real work asks you to accept the licence.
 
 --- slide ---
-title: Create an account
-rail: Create an account if you don't already have one
+title: Create an account (if you don't already have one)
+rail: Create an account 
 note: No account yet? ~signup~ is the same self-service signup as the Ident dyanmics @goident.ai. This step does not sign you in as a new account has to confirm its email address first.
 term:
 $ siar-app signup
@@ -100,8 +100,8 @@ Password:
 
 --- slide ---
 title: See which models are available to you
-rail: Users have access to different models. Use this function to see which models are available to you.
-note: The catalogue your installation's super user has published. Each description is theirs, so it says what the algorithm is actually being used for. **RUNS HERE** compares each build's tag against yours.
+rail:  Availablemodels
+note: Users have access to different models. Use this function to see which models are available to you.
 term:
 $ siar-app algorithms
 . NAME                      FINDS                  RUNS HERE  WHAT IT IS
@@ -117,8 +117,8 @@ fuzzy_hp_alpha            click, click_train     yes        Harbour-porpoise cli
 
 --- slide ---
 title: Which models are installed on this machine
-rail: Install models locally so siar-app can run offline.
-note: ~algorithms~ says what the server offers; ~installed~ says what you have. Works offline — it reads each bundle's manifest and never imports one. Add ~--check~ to ask whether a newer build is published.
+rail:  My models
+note: Which models are installed on this machine. Works offline. Add ~--check~ to ask whether a newer build is published.
 term:
 $ siar-app installed
 . NAME            VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE
