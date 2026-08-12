@@ -26,6 +26,7 @@ import sys
 from siarapp.config import home, legacy_env, read_json, write_json
 
 __all__ = [
+    "GETTING_STARTED",
     "LICENSE_NAME",
     "LICENSE_TEXT",
     "LICENSE_VERSION",
@@ -71,6 +72,15 @@ SCOPE_NOTE = (
     "This covers the siar-app command line only. The scanning algorithms it downloads "
     "are proprietary and are licensed separately by the IDent Dynamics installation you sign "
     "in to."
+)
+
+#: Printed once, the moment the licence is accepted — which is the first command anybody runs
+#: after installing, and so the one place a new user is certain to be looking. Both routes are
+#: local files inside the package: somebody on a vessel with no signal can still read them.
+GETTING_STARTED = (
+    "To get started, run either of these — both open in your browser and need no network:\n"
+    "    siar-app quick-start     the illustrated walkthrough, thirteen steps\n"
+    "    siar-app readme          the full manual"
 )
 
 
@@ -140,4 +150,7 @@ def require_license(*, stream=None) -> bool:
 
     path = accept_license()
     print(f"Accepted. Recorded in {path}.", file=out)
+    print(file=out)
+    print(GETTING_STARTED, file=out)
+    print(file=out)
     return True

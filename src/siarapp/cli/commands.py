@@ -22,7 +22,7 @@ import urllib.parse
 from argparse import Namespace
 from typing import Any
 
-from siarapp import __version__
+from siarapp import __version__, docs
 from siarapp.api import ApiError, AuthError, Client, client_from_credentials
 from siarapp.branding import copyright_line
 from siarapp.cli.table import render_table, terminal_width
@@ -61,6 +61,8 @@ __all__ = [
     "cmd_license",
     "cmd_login",
     "cmd_logout",
+    "cmd_quickstart",
+    "cmd_readme",
     "cmd_run",
     "cmd_runs",
     "cmd_signup",
@@ -129,6 +131,41 @@ def cmd_license(args: Namespace) -> int:
         print("Not yet accepted. Run `siar-app license --accept`, or accept the prompt on "
               "the first command that does any work.")
     return 0
+
+
+def _show(path: str, what: str) -> int:
+    """Open a local page in the browser, or say where it is when there is no browser."""
+    if docs.open_path(path):
+        print(f"Opened the {what} in your browser.")
+        print(f"  {path}")
+        return 0
+    print(f"No browser to open here. The {what} is at:")
+    print(f"  {path}")
+    print("Copy that path into a browser on any machine — it needs no network.")
+    return 0
+
+
+def cmd_quickstart(_args: Namespace) -> int:
+    """Open the illustrated quickstart, offline, in the user's browser."""
+    try:
+        return _show(docs.quickstart_path(), "quickstart")
+    except docs.DocsError as e:
+        return _err(str(e))
+
+
+def cmd_readme(args: Namespace) -> int:
+    """Open the full manual in the browser, or print it as Markdown.
+
+    The README ships in the wheel's own metadata rather than as a second copy of the file,
+    so this works from an installed tool with no network and no repository in sight.
+    """
+    try:
+        if args.text:
+            print(docs.readme_markdown())
+            return 0
+        return _show(docs.write_readme_page(), "manual")
+    except docs.DocsError as e:
+        return _err(str(e))
 
 
 #: What to tell someone whose terminal cannot prompt — a CI job, a pipe, an agent shell.

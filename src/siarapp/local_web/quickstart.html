@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>siar-app — install and first survey</title>
+  <link rel="stylesheet" href="quickstart.css">
+</head>
+<body>
+
+  <main class="deck">
+    <header class="masthead">
+      <p class="eyebrow" id="eyebrow"></p>
+      <h1 id="headline"></h1>
+      <p class="standfirst" id="intro"></p>
+    </header>
+
+    <div class="stage">
+      <nav class="rail" aria-label="Steps">
+        <p class="rail-title" id="rail-title">Steps</p>
+        <ol id="rail"></ol>
+      </nav>
+
+      <section class="slide" aria-live="polite">
+        <div class="slide-head">
+          <span class="slide-step" id="slide-step"></span>
+          <h2 id="slide-title"></h2>
+        </div>
+
+        <div class="term">
+          <div class="term-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="term-title" id="term-title">user@vi: ~</span>
+          </div>
+          <pre class="term-body" id="term" tabindex="0" aria-label="Terminal transcript"></pre>
+        </div>
+
+        <p class="note" id="note"></p>
+
+        <div class="controls">
+          <button id="prev" type="button">&lsaquo; Back</button>
+          <button id="next" type="button">Next &rsaquo;</button>
+          <span class="hint">&larr; &rarr; to move</span>
+          <span class="counter" id="counter"></span>
+        </div>
+      </section>
+    </div>
+
+    <footer class="colophon" id="colophon"></footer>
+  </main>
+
+  <script src="page-text.js"></script>
+  <script src="quickstart.js"></script>
+</body>
+</html>

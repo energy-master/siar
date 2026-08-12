@@ -60,7 +60,13 @@ that this fails at install time rather than at the first scan.
 </details>
 
 The first command you run shows the MIT licence and asks you to accept it, once. See
-[Licence](#licence).
+[Licence](#licence). It then points you at the two ways in, both of which open in a browser and
+need no network:
+
+```bash
+siar-app quick-start      # the illustrated walkthrough, thirteen steps
+siar-app readme           # this manual
+```
 
 ## Quick start
 
@@ -247,13 +253,15 @@ comes back in one click next time.
 
 ## Command reference
 
-Twelve commands. Four of them (`version`, `installed`, `scan`, and `run --algorithm-path`) work
-without an account; the rest need a login.
+Fourteen commands. Six of them (`version`, `quick-start`, `readme`, `installed`, `scan`, and
+`run --algorithm-path`) work without an account; the rest need a login.
 
 | Command | What it does | Needs a login |
 |---|---|---|
 | [`version`](#siar-app-version) | the package version and this machine's build tag | no |
 | [`license`](#siar-app-license) | show the licence, or accept it without a prompt | no |
+| [`quick-start`](#siar-app-quick-start) | open the illustrated quickstart in a browser | no |
+| [`readme`](#siar-app-readme) | open this manual in a browser | no |
 | [`signup`](#siar-app-signup) | create an IDent Dynamics account | no — it makes one |
 | [`login`](#siar-app-login-username) | sign in and cache a bearer token | — |
 | [`logout`](#siar-app-logout) | forget the cached token on this machine | no |
@@ -307,6 +315,48 @@ may want to redirect it — and says whether they have been accepted on this mac
 | `--accept` | record acceptance and exit, for a script or a container |
 
 See [Licence](#licence) below.
+
+### `siar-app quick-start`
+
+Opens the illustrated quickstart in whatever browser this machine has — thirteen steps, from
+installing `uv` through to rating an algorithm, each one a terminal window showing the real
+command and its real output.
+
+```bash
+$ siar-app quick-start
+Opened the quickstart in your browser.
+  /home/you/.local/share/uv/tools/siar-app/lib/python3.13/site-packages/siarapp/local_web/quickstart.html
+```
+
+It ships **inside the package** and pulls nothing from the internet, so it works on a vessel
+with no signal. No flags, no login, and it runs before the licence has been accepted — a
+prompt in front of the manual would be a poor greeting.
+
+On a headless box, where there is no browser to open, it prints that path instead of
+pretending it worked. Copy it to any machine that has one.
+
+To change what it says, edit `page-text.js` beside it: the whole deck is plain text with a
+one-character marker per line, and the numbering and step list follow whatever is in the file.
+
+### `siar-app readme`
+
+This document, rendered and opened in your browser.
+
+```bash
+$ siar-app readme
+Opened the manual in your browser.
+  /tmp/siar-app-readme-xxxxxxxx/siar-app-readme.html
+```
+
+| Flag | Meaning |
+|---|---|
+| `--text` | print it as Markdown on stdout instead of opening a browser |
+
+Also offline. Nothing extra was packaged to make this work: `pyproject.toml` names this file as
+the project's long description, so every wheel already carries the whole of it in its metadata,
+and that is what gets rendered. A source checkout reads `README.md` from the repository root
+instead — the file wins over the metadata, so editing it and re-running shows the edit rather
+than whatever was current when you last installed.
 
 ### `siar-app signup`
 
@@ -584,6 +634,55 @@ The token pair is the whole non-interactive story: set `SIAR_APP_TOKEN` and
 **Exit codes.** 0 on success, 1 on a handled failure — a bad folder, an expired token, a run
 with errors in it — and 130 on Ctrl-C. Expected failures print one sentence to stderr, not a
 traceback.
+
+## Updating and removing it
+
+### Update
+
+```bash
+uv tool upgrade siar-app
+```
+
+The normal path. It re-resolves the git source and reinstalls if anything moved. Because the
+install is a git URL rather than a released version, `uv` compares version numbers — so if
+`pyproject.toml` has not been bumped it can report there is nothing to do while the branch has
+in fact moved on. Force it:
+
+```bash
+uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git
+```
+
+Neither touches `~/.siar-app`: your token, your licence acceptance, your run history and every
+cached algorithm survive an upgrade.
+
+**To update an algorithm rather than the CLI**, see [`installed --check`](#siar-app-installed)
+for which builds have a newer version published, then `siar-app run --refresh -a <name>` to
+replace a cached bundle on the next run. Nothing ever replaces a cached bundle behind your
+back — the cache is yours until you ask.
+
+Installed with `pip` instead? `python3.13 -m pip install --upgrade git+https://github.com/energy-master/siar.git`.
+
+### Remove
+
+```bash
+uv tool uninstall siar-app        # the CLI and the private 3.13 that ran it
+rm -rf ~/.siar-app                # token, licence, run history, cached algorithms
+```
+
+Or `python3.13 -m pip uninstall siar-app` for a `pip` install. Three things worth knowing:
+
+- **Revoke the token first if the machine is leaving your hands.** `siar-app logout` is local,
+  and so is deleting `~/.siar-app` — the token stays valid on the server either way. Kill it
+  from your account page in the web app.
+- **Deleting the workspace deletes the algorithm cache**, which is the only expensive part to
+  rebuild. To keep your login and clear only the bundles, remove
+  `~/.siar-app/algorithms` and leave the rest.
+- **A pre-rename workspace normally isn't left behind.** The first run after the rename *moves*
+  `~/.siar-scanner` to `~/.siar-app` rather than copying it. Worth a look only if that move ever
+  failed — the tool says so on stderr when it does.
+
+Nothing is written outside `~/.siar-app` and `uv`'s own tool directory, so those two removals
+are the whole of it.
 
 ## What is in the output
 

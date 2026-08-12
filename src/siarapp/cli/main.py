@@ -9,6 +9,8 @@ Subcommands:
 
 * ``siar-app version``    — the package version and this machine's build tag.
 * ``siar-app license``    — show the licence, or accept it non-interactively.
+* ``siar-app quick-start``— open the illustrated quickstart in a browser, offline.
+* ``siar-app readme``     — open the full manual in a browser, offline.
 * ``siar-app signup``     — create an IDent Dynamics account.
 * ``siar-app login``      — sign in to IDent Dynamics and cache a token.
 * ``siar-app logout``     — forget the cached token.
@@ -38,8 +40,10 @@ __all__ = ["build_parser", "main"]
 #:
 #: ``version`` and ``license`` are the two a user needs in order to answer the question the gate
 #: is asking — what is this, and what am I agreeing to. Gating either would be a licence you
-#: have to accept before you may read it.
-_UNGATED = frozenset({"version", "license"})
+#: have to accept before you may read it. The two documentation commands join them for the
+#: same reason: they are where somebody goes to find out what they have just installed, and a
+#: prompt in front of the manual is a poor greeting.
+_UNGATED = frozenset({"version", "license", "quick-start", "quickstart", "readme"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="siar-app",
         description=f"{PRODUCT} — {TAGLINE}. "
                     "Run the IDent Dynamics structure scanners over a folder of recordings.",
-        epilog="Start with: siar-app signup (or login if you have an account), "
+        epilog="New here? Run siar-app quick-start for the illustrated walkthrough, or "
+               "siar-app readme for the manual. Otherwise: siar-app signup (or login), "
                "then siar-app algorithms.",
     )
     parser.add_argument("--version", action="version", version=f"siar-app {__version__}")
@@ -84,6 +89,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_license.add_argument("--accept", action="store_true",
                            help="record acceptance and exit — for a script or a container")
+
+    sub.add_parser(
+        "quick-start",
+        aliases=["quickstart"],
+        help="open the illustrated quickstart in your browser",
+        description="Open the thirteen-step quickstart — install, sign up, scan a folder, "
+        "read the result — in whatever browser this machine has. It ships inside the "
+        "package, so it needs no network at all.",
+    )
+
+    p_readme = sub.add_parser(
+        "readme",
+        help="open the full manual in your browser",
+        description="Open the complete siar-app manual in your browser. It is rendered from "
+        "the copy carried inside this install, so it matches the version you are running and "
+        "needs no network.",
+    )
+    p_readme.add_argument("--text", action="store_true",
+                          help="print it as Markdown instead of opening a browser")
 
     p_signup = sub.add_parser(
         "signup",
@@ -231,6 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
 _DISPATCH = {
     "version": commands.cmd_version,
     "license": commands.cmd_license,
+    "quick-start": commands.cmd_quickstart,
+    "quickstart": commands.cmd_quickstart,
+    "readme": commands.cmd_readme,
     "signup": commands.cmd_signup,
     "login": commands.cmd_login,
     "logout": commands.cmd_logout,

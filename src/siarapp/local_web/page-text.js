@@ -1,0 +1,221 @@
+/* The words on the quickstart page. Edit the text below, save, reload the browser.
+
+   It is a .js rather than a .txt because a browser will not read a .txt off local disk when
+   the page was opened with File > Open. Two typing rules follow from that: write a backtick
+   as \` , and never write a dollar sign immediately followed by { .
+
+   A slide starts with  --- slide ---  and carries three fields: title, rail (its short name
+   in the left-hand list) and note (the paragraph under the terminal, where **stars** make
+   bold and ~tildes~ make code). A line reading  term:  begins the transcript.
+
+   In a transcript the first two characters set the colour:
+     $   a command typed at the prompt      !   a figure worth noticing
+     >   a question, as  Label: :: answer   +   it worked
+     .   quiet text: notes, table headings  -   a table rule
+   Anything else is ordinary output, and its leading spaces are kept, which is what holds the
+   table columns in line. A blank line stays blank.
+
+   Reorder slides by moving their blocks, delete one by deleting its block; the numbering,
+   the step count and the left-hand list all follow. */
+
+window.QUICKSTART_TEXT = `
+
+eyebrow: SIaR · Signal Information and Reconnaissance
+headline: From an empty shell to boxes on a spectrogram
+intro: Thirteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
+prompt: user@vi:~$
+window: user@vi: ~
+railtitle: Steps
+footer: Commands and output are the real thing, taken from the siar-app README. Paths assume a Linux box; on macOS the workspace is the same ~/.siar-app.
+
+--- slide ---
+title: Get uv
+rail: Get uv
+note: **Use uv, and let it choose the Python.** The scanners are prebuilt bundles tied to CPython **3.13 exactly** — not 3.12, not 3.14. This installs uv alone; the Python comes next.
+term:
+$ curl -LsSf https://astral.sh/uv/install.sh | sh
+. installing to /home/user/.local/bin
+.   uv
+.   uvx
++ everything's installed!
+
+. # Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+--- slide ---
+title: Install siar-app
+rail: Install siar-app
+note: One command, and it is self-contained: ~uv tool install~ fetches a private 3.13 for this tool alone, so it works whatever Python your system has and whatever you upgrade to later.
+term:
+$ uv tool install --python 3.13 git+https://github.com/energy-master/siar.git
+. Resolved 4 packages in 1.21s
+. Installed 4 packages in 34ms
+.  + numpy==2.1.3
+.  + soundfile==0.12.1
++ Installed 1 executable: siar-app
+
+. # numpy and soundfile, and nothing else. Runs on CPU.
+
+--- slide ---
+title: Check the build tag
+rail: Check the build tag
+note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
+term:
+$ siar-app version
+siar-app 0.1.0
+! platform     linux-x86_64-cp313
+python       3.13.1
+licence      MIT (not yet accepted)
+. © Vixen Intelligence 2026
+
+. # The first command that does real work asks you to accept the licence.
+
+--- slide ---
+title: Create an account
+rail: Create an account
+note: No account yet? ~signup~ is the same self-service signup as the web form, without the browser. It does not sign you in — a new account has to confirm its email address first.
+term:
+$ siar-app signup
+> Email: :: you@example.com
+> Username (3-64 chars, letters digits . _ -): :: you
+> Display name (optional): :: Survey Team
+Password (8+ characters):
+Confirm password:
++ Account created on https://goident.ai as you.
+We've emailed a verification link to you@example.com.
+Click it, then run \`siar-app login\`.
+
+--- slide ---
+title: Sign in
+rail: Sign in
+note: The scanners live in your IDent Dynamics installation, not in this package. The token is cached at mode 0600 and is what every later command uses. In a script, set ~$SIAR_APP_TOKEN~ instead.
+term:
+$ siar-app login
+> IDent Dynamics username or email: :: you@example.com
+Password:
++ Signed in to https://goident.ai as you.
+. Token saved to /home/user/.siar-app/credentials.json
+. (delete it, or run \`siar-app logout\`, to sign out).
+
+. # siar-app whoami says who you are; siar-app logout forgets the token.
+
+--- slide ---
+title: See what you can run
+rail: See what you can run
+note: The catalogue your installation's super user has published. Each description is theirs, so it says what the algorithm is actually being used for. **RUNS HERE** compares each build's tag against yours.
+term:
+$ siar-app algorithms
+. NAME                      FINDS                  RUNS HERE  WHAT IT IS
+- ------------------------  ---------------------  ---------  --------------------------
+all_structures            sweep, tonal, click,   yes        The survey. Boxes every
+                          patch, blob                       significant structure.
+all_structures_sensitive  sweep, tonal, click,   yes        Lower bar, for faint
+                          patch, blob                       structure in a quiet file.
+fuzzy_hp_alpha            click, click_train     yes        Harbour-porpoise click
+                                                            candidates, 90-150 kHz.
+
+. # --params prints what each one lets you tune.
+
+--- slide ---
+title: What is on this machine
+rail: What is on this machine
+note: ~algorithms~ says what the server offers; ~installed~ says what you have. Works offline — it reads each bundle's manifest and never imports one. Add ~--check~ to ask whether a newer build is published.
+term:
+$ siar-app installed
+. NAME            VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE
+- --------------  -------  ------------------  -------  ----------------  ---------
+all_structures  1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18  yes
+
+. 1 bundle(s), 1.0 MiB in /home/user/.siar-app/algorithms
+
+. # The cache is yours until you refresh it: run --refresh replaces a bundle.
+
+--- slide ---
+title: Look before you scan
+rail: Look before you scan
+note: Headers only, so this takes about a second on a corpus that will take hours. Worth the second: if that table shows **more than one sample rate**, every frequency band maps to a different bin per group — scanning the folder as one thing is really scanning several.
+term:
+$ siar-app scan ~/survey-audio
+412 recording(s) under /home/user/survey-audio
+! 27.40 h of audio
+
+. SAMPLE RATE  FILES
+- -----------  -----
+96000 Hz       412
+
+. # No decode, no algorithm, no login needed.
+
+--- slide ---
+title: Run the survey
+rail: Run the survey
+note: The first run downloads the algorithm and caches it. Every run after that is **completely offline** — useful on a vessel, required in a lab with no network. Ctrl-C at any point leaves a usable folder, and ~--resume~ picks it up.
+term:
+$ siar-app run ~/survey-audio --algorithm all_structures --out ~/survey-scan
+. algorithm  all_structures (linux-x86_64-cp313)
+. scanning   /home/user/survey-audio
+. output     /home/user/survey-scan
+[412/412] station-c/2025-09-08T1400.wav: 37 structures
+
+412 file(s), 27.40 h of audio, in 1841.2s
+! 9,043 structures: 122 click_train, 4188 click, 219 sweep, 3901 tonal, 613 patch
+. 1 file(s) error
+
+--- slide ---
+title: Open the result
+rail: Open the result
+note: The output folder mirrors your input folder's layout. In the web app use **Open folder** and pick it: every recording becomes a lane with its preview, and clicking one draws its boxes over the surface.
+term:
+$ tree ~/survey-scan
+/home/user/survey-scan/
+  station-c/
+    2025-09-08T1400.wav              copy of your recording
+!     2025-09-08T1400.structures.json  what the scanner found
+    2025-09-08T1400.png              the lane thumbnail
+.   siar-app-run.json                  what was run, and what came back
+.   siar-app-performance.json          what it cost
+
+. # Every sidecar declares the family of the model that wrote it.
+
+--- slide ---
+title: What you have run
+rail: What you have run
+note: Local history, not an account-wide one — read from ~/.siar-app/runs.json. Newest first: when, which algorithm, how many files, how many structures, and where the output went.
+term:
+$ siar-app runs --limit 3
+. WHEN                  ALGORITHM       FILES  FOUND  OUTPUT
+- --------------------  --------------  -----  -----  ---------------------
+2026-08-10T11:26:00Z  all_structures    412   9043  /home/user/survey-scan
+2026-08-09T08:02:11Z  fuzzy_hp_alpha     20    311  /home/user/hp-trial
+
+. # --json gives the raw history.
+
+--- slide ---
+title: Rate the algorithm
+rail: Rate the algorithm
+note: This is the only channel the people who publish these have for finding out whether a scanner works on water they have never recorded. The rating is filed against the build **installed on this machine** — a bumped version starts with a clean sheet.
+term:
+$ siar-app feedback all_structures -s 7 -m "found the sweeps, missed two faint tonals"
++ Thanks — all_structures 1.1.0 rated 7/9.
+That build now averages 6.7/9 from 3 ratings.
+
+. # 0-2 nothing useful   3-5 needed sorting
+. # 6-7 found it, some noise   8-9 found it and little else
+
+--- slide ---
+title: Update it, or take it off
+rail: Update or remove
+note: An upgrade never touches ~/.siar-app, so your token, licence, history and cached algorithms all survive it. Removing the tool leaves that folder behind — and **your token stays valid on the server** either way, so revoke it from your account page if the machine is leaving your hands.
+term:
+$ uv tool upgrade siar-app
+. Updated siar-app v0.1.0 -> v0.2.0
+
+. # Installed from git, so uv compares version numbers. Same number, newer commit?
+$ uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git
++ Installed 1 executable: siar-app
+
+. # Taking it off: the CLI and its private 3.13, then the workspace
+$ uv tool uninstall siar-app
+$ rm -rf ~/.siar-app
+
+! siar-app logout is local. Revoke the token from your account page.
+
+`;

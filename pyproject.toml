@@ -32,5 +32,12 @@ siar-app = "siarapp.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The quickstart page and its three companions are shipped inside the package, not left at the
+# repository root, so that `siar-app quick-start` can still find them after `uv tool install`.
+# The README is NOT duplicated here: `readme = "README.md"` above already puts the whole of it
+# into the wheel's metadata, which is where siarapp/docs.py reads it back from.
+[tool.setuptools.package-data]
+siarapp = ["local_web/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
