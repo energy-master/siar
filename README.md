@@ -1,13 +1,12 @@
 # siar-app
 
-**SIaR — Signal Information and Reconnaissance.** Part of [goident.ai](https://goident.ai).
+**SIaR — Signal Information and Reconnaissance.** 
 
-Run the IDent Dynamics structure scanners over a folder of recordings, on your own machine.
+Run our models locally against your dataset securely and offline.
 
-Point it at a root folder of WAV or FLAC. It scans every recording and writes an output folder
-you drag into the IDent Dynamics web app — every box the scanner found, on every file, with a
-spectrogram preview on every lane.
+SIaR allows you to point our model(s) against your dataset and build resulting datasets in your own secure and offline environment. Download the models you wish to use and run them. All output can be viewed by dropping your output folder into IDent dynamics at [goident.ai] or view locally in our slimmed down version of the viewer.
 
+The data pipeline:
 ```
 audio folder -> STFT -> scanning algorithm -> boxes + thumbnails -> a folder the app opens
 ```
@@ -22,10 +21,10 @@ happened around 4 seconds".
 uv tool install --python 3.13 git+https://github.com/energy-master/siar.git
 ```
 
-Runs on CPU. Pulls in numpy and soundfile, and nothing else.
+Runs on your CPU. Pulls in numpy and soundfile, and nothing else.
 
-**Use `uv`, and let it choose the Python.** The scanning algorithms are downloaded as prebuilt
-bundles tied to CPython **3.13 exactly** — not 3.12, not 3.14. `uv tool install` fetches a
+**Use `uv`, and let it choose the Python.** The algorithms are downloaded as prebuilt
+bundles tied to CPython **3.13 exactly**. `uv tool install` fetches a
 private 3.13 for this tool and keeps it isolated, so the CLI works whatever Python your system
 happens to have and whatever you upgrade to later. Installing with `pip` under the wrong
 interpreter produces a CLI that runs, signs in, and then finds no algorithm it can load.
@@ -39,9 +38,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh      # macOS / Linux
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
 ```
-
-Both install `uv` itself and nothing else; the Python comes later, when `uv tool install` fetches
-the 3.13 this tool needs.
 
 To upgrade later: `uv tool upgrade siar-app`.
 
@@ -59,9 +55,8 @@ that this fails at install time rather than at the first scan.
 
 </details>
 
-The first command you run shows the MIT licence and asks you to accept it, once. See
-[Licence](#licence). It then points you at the two ways in, both of which open in a browser and
-need no network:
+The first command you run shows the MIT licence and asks you to accept it. See
+[Licence](#licence). Run the commands below to get started.
 
 ```bash
 siar-app quick-start      # the illustrated walkthrough, thirteen steps
