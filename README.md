@@ -223,14 +223,22 @@ Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.
 While a recording is being worked on, that line is live and says what is happening to it:
 
 ```
-[287/412] station-c/2025-09-08T1400.wav  1.9 GiB · 30.0 min  [scan]  ████████░░░░░ 61%  38s of ~62s
+[287/412] station-c/1400.wav  1.9 GiB · 30.0 min  [scan]  ████████░░░ 61%  38s of ~62s  ·  41s on the file
 ```
 
 The size and the length come from the file itself, and the tag in the middle is the stage it is
-in right now — one of the same five the table below charges the time to. Nearly all of a
-recording's time is spent inside `scan`, which is a single call into a closed algorithm with no
-way to report progress from within, so the stage is what distinguishes a run that is working from
-one that is stuck on a slow disk.
+in right now — one of the same five the table below charges the time to.
+
+**The bar is the stage's, and it starts again at each one.** That matters more than it sounds:
+the five stages are nothing like equal, and `scan` is typically 90% of a recording. A bar drawn
+against the whole file is therefore full before the scan has even begun, and then sits at 99% for
+the hour that the work actually takes. Per stage, `[decode]` and `[fft]` each get their own short
+bar and `[scan]` gets a long one that means something.
+
+The estimate behind it is throughput: seconds of wall time per second of audio, per stage,
+measured on this run — and before this run has measured anything, taken from the last time the
+same algorithm ran on this machine (`~/.siar-app/runs.json`). A first run of a new algorithm
+still has nothing to draw with and reports elapsed time alone until its first recording lands.
 
 `realtime` is the row to plan with: 53.6x means the scan ran 53.6 times faster than the audio it
 scanned, so an hour of recording cost about a minute. It counts only audio this run actually
@@ -291,17 +299,25 @@ parameters wherever it runs.
 The display becomes one row per worker, so a stalled lane is visible rather than buried:
 
 ```
-[████████████░░░░░░░░░░░░]  48%  12043/25318 files  201.4 h of 418.2 h audio
-12 workers  ·  38.1x realtime  ·  5:24:11 elapsed  ·  5:41:03 left  ·  91043 structures
-  1  ████████░░░░░░  61%    38s  [scan]    station-a/2026-07-03/0410.wav  3.3 GiB · 40.0 min
-  2  ██░░░░░░░░░░░░  17%    11s  [decode]  station-a/2026-07-03/0420.wav  238.4 MiB · 10.0 min
+[████████████░░░░░░░░░░░░]  48%  12043/25318 files  ~201.4 h of 418.2 h audio  ~38.1x realtime
+12 workers  ·  5:24:11 elapsed  ·  5:41:03 left  ·  91043 structures
+  1  ████████░░░░░░  61%    38s   40.2x  [scan]    station-a/0410.wav  3.3 GiB · 40.0 min
+  2  ██░░░░░░░░░░░░  17%    11s   35.9x  [decode]  station-a/0420.wav  238.4 MiB · 10.0 min
   3  ··············    —      idle
 ```
 
-Each row says which stage the recording is in — `decode`, `fft`, `scan`, `write`, `thumbnail`,
-the same five the closing table charges the time to — and how big the file is, in bytes and in
-audio. Those three facts together are what make a slow lane readable rather than worrying: a row
-sitting at 40% for ten minutes means something quite different once it says `[scan]` on 3.3 GiB.
+Each row says how far through its **current stage** that worker is, how long it has been on the
+recording, **its own realtime factor**, which stage it is in, and how big the file is in bytes
+and in audio. The per-worker factor is that lane's own measurement, not the run's divided by the
+pool — which is the point of having a row per worker at all: a lane running at half the speed of
+its neighbours is a number that says so.
+
+The top line is the corpus, and its bar counts **scan progress**: a recording still being decoded
+has not been scanned in any sense worth drawing, one half-way through its scan is half done, and
+one that has reached `write` is finished as far as the algorithm is concerned. Counting whole
+files only is how a bar reads 2% while every row under it reads 40%. The `~` marks the figures
+that include work still in flight — they are estimates, and they converge on the closing table's
+exact numbers as the recordings land.
 
 Two things to know before turning it up:
 
@@ -326,8 +342,8 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 
 ```
 ╭─ all_structures · 12 workers ─────────────────────────────────── 5:24:11 elapsed ─╮
-│ ████████████████░░░░░░░░░░░░░░░░░  48%  12043/25318 files  201.4 h of 418.2 h     │
-│ 38.1x realtime  ·  5:41:03 left  ·  91,043 structures  ·  3 errors                │
+│ ██████████████░░░░░░░░░░░░░░░  48%  12043/25318 files  ~201.4 h of 418.2 h  ~38.1x│
+│ 5:41:03 left  ·  91,043 structures  ·  3 errors                                   │
 ├─ time by stage ─────────────────────────┬─ structures found ──────────────────────┤
 │ scan         48.90 h  ██████████  91%   │ click        41,882  ██████████         │
 │ fft           2.71 h  █·········   5%   │ tonal        39,014  █████████·         │
@@ -335,8 +351,8 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 │ decode        0.85 h  ··········   2%   │ sweep         2,194  ··········         │
 │ write         0.16 h  ··········   0%   │ click_train   1,822  ··········         │
 ├─ workers ─────────────────────────────────────────────────────────────────────────┤
-│   1  ████████░░░░  61%    38s  [scan]    …0410.wav       3.3 GiB · 40.0 min       │
-│   2  ██░░░░░░░░░░  17%    11s  [decode]  …0420.wav     238.4 MiB · 10.0 min       │
+│   1  ████████░░░░  61%    38s   40.2x  [scan]    …0410.wav   3.3 GiB · 40.0 min   │
+│   2  ██░░░░░░░░░░  17%    11s   35.9x  [decode]  …0420.wav  238.4 MiB · 10.0 min  │
 │   3  ············   idle                                                          │
 ├─ problems ────────────────────────────────────────────────────────────────────────┤
 │ ! station-b/2026-06-28/1130.wav: could not decode: Format not recognised.         │

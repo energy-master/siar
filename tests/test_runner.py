@@ -468,3 +468,23 @@ def test_resumed_files_do_not_inflate_the_estimate(corpus, stub, tmp_path):
         audio_total_sec=1000.0, audio_done_sec=900.0, audio_worked_sec=10.0,
     )
     assert naive["eta_sec"] == pytest.approx(10.0)
+
+
+def test_a_run_records_what_the_next_run_draws_its_first_bars_from(corpus, stub, tmp_path,
+                                                                   monkeypatch):
+    """The history carries throughput and its stage split, or every run starts blind."""
+    monkeypatch.setenv("SIAR_APP_HOME", str(tmp_path / "home"))
+    from siarapp.cli import commands
+    from siarapp.cli.main import build_parser
+    from siarapp.config import recent_cost
+
+    args = build_parser().parse_args([
+        "run", str(corpus), "--out", str(tmp_path / "out"),
+        "--algorithm-path", str(tmp_path / "algo" / "src"), "--algorithm", "stub", "-q",
+    ])
+    assert commands.cmd_run(args) == 0
+
+    rate, shares = recent_cost("stub")
+    assert rate > 0, "a run that scanned audio must leave a cost behind"
+    assert shares.get("scan", 0) > 0
+    assert recent_cost("some_other_algorithm") == (0.0, {})
