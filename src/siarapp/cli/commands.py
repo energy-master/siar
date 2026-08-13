@@ -783,7 +783,7 @@ def cmd_run(args: Namespace) -> int:
     print(f"output     {out_root}")
 
     started = time.time()
-    reporter = _reporter(args, handle.slug)
+    reporter = _reporter(args, handle.slug, source, out_root)
     failure = ""
     try:
         manifest = run_folder(
@@ -792,10 +792,15 @@ def cmd_run(args: Namespace) -> int:
             on_start=None if args.quiet else reporter.on_start,
             on_corpus=None if args.quiet else reporter.on_corpus,
             on_idle=None if args.quiet else reporter.on_idle,
-            # A display that owns the bottom of the screen would draw over a warning printed from
-            # under it, so it is offered the warning instead and decides where it goes.
+            # A display that owns the screen would draw over a warning printed from under it, so it
+            # is offered the warning instead and decides where it goes.
             warn=getattr(reporter, "note", None) or _warn,
         )
+        # A panel that wiped itself the moment the run ended would take the answer with it. The one
+        # display that owns the screen keeps it, with the closing metrics in it, until dismissed.
+        hold = getattr(reporter, "hold", None)
+        if hold is not None:
+            hold(_metric_rows(manifest))
     except (FileNotFoundError, ValueError, ScannerError) as e:
         # Held rather than printed here: an `except` body runs *before* the `finally`, so a
         # message printed from one lands in the middle of a live display that is about to be
@@ -830,7 +835,7 @@ def _warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
 
-def _reporter(args: Namespace, slug: str):
+def _reporter(args: Namespace, slug: str, source: str = "", out_root: str = ""):
     """Choose the live display for this run.
 
     Three of them, because they draw genuinely different runs and neither can draw another's: one
@@ -838,13 +843,21 @@ def _reporter(args: Namespace, slug: str):
     run in one panel. The choice is made here rather than by a flag inside one class that would
     spend half its code deciding which of the three it was.
 
-    ``--tui`` needs a terminal to redraw in place. Off one — a log, a pipe, a CI job — it would
-    emit a frame every quarter second, so it falls back to the display that degrades to one line per
-    recording and says so once.
+    ``--tui`` needs a terminal: it takes over the screen and redraws in place. Off one — a log, a
+    pipe, a CI job — it would emit a frame every quarter second, so it falls back to the display
+    that degrades to one line per recording and says so once.
+
+    Args:
+        args: The parsed command line.
+        slug: The algorithm being run, for the panel's title.
+        source: Folder being scanned, and
+        out_root: folder being written. Only ``--tui`` uses them, because it is the only display
+            that hides the lines which announced them.
     """
     if args.tui:
         if sys.stdout.isatty():
-            return TuiDisplay(slug, workers=args.parallel if args.parallel > 0 else 1)
+            return TuiDisplay(slug, workers=args.parallel if args.parallel > 0 else 1,
+                              source=source, out=out_root)
         _warn("--tui needs a terminal; reporting one line per recording instead")
     return WorkerPanel() if args.parallel != 1 else ScanReporter()
 

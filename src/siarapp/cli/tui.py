@@ -12,16 +12,25 @@ answers the questions asked while a survey is *running* and nowhere else:
 * Is anything stuck, and did anything fail? A fixed row per worker, and the failures kept on
   screen instead of scrolling past at three in the morning.
 
-**One frame, no scrolling.** Everything is drawn inside a box that is redrawn in place, sized to
-the terminal each tick, so nothing the run prints can push it apart. Sections are dropped in a
-fixed order when the terminal is too short for all of them, so a 24-line window still shows the bar
-and the totals rather than half a frame. Warnings and errors are collected as well as shown, and
-reprinted as plain lines on the way out — the frame is gone by the time the summary prints, and a
-failure nobody can scroll back to is a failure nobody fixed.
+**It takes the screen.** The run gets the alternate screen buffer — the one ``vim`` and ``less``
+use — cleared, and the frame is drawn to the terminal's full width and full height, repainted from
+the top left each tick. So there is no scrollback to fight with, no arithmetic about how tall the
+panel was last time, and a window resized mid-run is simply drawn again at its new size. On the way
+out the buffer is handed back untouched: the shell looks exactly as it did, and the closing summary
+prints under the command that started the run.
 
-Stdlib only, like everything else here: ANSI cursor movement and box-drawing characters, no curses,
-no ``rich``. Off a terminal there is nothing to redraw in place, so the flag falls back to the
-ordinary displays rather than emitting a frame per tick into a log.
+The frame always fills the window. Sections have a fixed order and the least useful are dropped
+when the terminal is too short, so a small window still shows the bar and the totals; the
+completions list has no natural length and is stretched to reach the bottom rule, so a tall window
+is full of run rather than empty below the middle.
+
+Warnings and errors are collected as well as shown, and reprinted as plain lines once the buffer is
+handed back — everything drawn inside it is discarded, and a failure nobody can scroll back to is a
+failure nobody fixed.
+
+Stdlib only, like everything else here: ANSI escapes and box-drawing characters, no curses, no
+``rich``. Off a terminal there is no screen to take, so the flag falls back to the ordinary
+displays rather than emitting a frame per tick into a log.
 """
 from __future__ import annotations
 
@@ -31,19 +40,33 @@ import threading
 import time
 from collections import deque
 
+try:  # POSIX only, and only needed to read one keystroke at the end of a run.
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - Windows
+    termios = None
+    tty = None
+
 from siarapp.cli.format import (
     BAR_CAP,
+    BOLD,
+    CYAN,
+    DIM,
+    GREEN,
     HIDE_CURSOR,
+    RED,
     SHOW_CURSOR,
-    clip,
+    YELLOW,
     clock,
     cost,
     duration,
     factor_text,
+    fit,
     fit_path,
+    paint,
     share,
+    visible_len,
 )
-from siarapp.cli.table import terminal_width
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
 
 __all__ = ["TuiDisplay"]
@@ -52,9 +75,10 @@ __all__ = ["TuiDisplay"]
 #: ten-hour survey should not spend its evening drawing boxes.
 _TICK_SEC = 0.25
 
-#: Rows kept in the "just finished" section. What fits is drawn; the rest is history the counters
-#: already carry.
-_RECENT = 8
+#: Completions remembered for the "just finished" section. As many as reach the bottom of the
+#: screen are drawn, so this is a ceiling for a tall terminal rather than a layout choice; the rest
+#: is history the counters already carry.
+_RECENT = 60
 
 #: Problems kept on screen. Older ones are still reprinted on the way out.
 _PROBLEMS = 3
@@ -71,8 +95,28 @@ _MINI_BAR = 10
 #: cannot hold two labelled bars side by side and the attempt is unreadable.
 _TWO_COLUMN_MIN = 96
 
-#: Lines the frame needs before any optional section: the two rules, the bar and the totals.
-_FRAME_OVERHEAD = 4
+#: What dismisses the finished panel: Ctrl-Q as asked for, and ``q`` because someone will try it.
+_QUIT_KEYS = (b"\x11", b"q", b"Q")
+
+#: Drawn on the last line when a run has less history than screen. True, and the thing worth
+#: knowing while watching a scan that might need stopping.
+_FOOTER = "Ctrl-C leaves a usable folder — --resume picks it up where it stopped."
+
+#: And once it has finished. The panel is worth nothing if the reader cannot tell it is waiting for
+#: them rather than still working.
+_HELD_FOOTER = "Run complete — Ctrl-Q (or q) to close this panel."
+
+#: Shortest terminal the frame will draw itself into. Below this it is drawn at this height anyway
+#: and the terminal scrolls it: a window eight lines tall cannot show a run, and pretending
+#: otherwise would mean deciding which of the two rules to leave out.
+_MIN_HEIGHT = 10
+
+#: The alternate screen buffer — what ``vim`` and ``less`` use. Entering it gives the run a blank
+#: screen of its own to own completely; leaving it puts the shell's scrollback back exactly as it
+#: was, so the closing summary prints under the command that started the run rather than under the
+#: wreckage of a panel.
+_ENTER_SCREEN = "\033[?1049h\033[H\033[2J"
+_LEAVE_SCREEN = "\033[?1049l"
 
 
 class TuiDisplay:
@@ -85,14 +129,18 @@ class TuiDisplay:
     Args:
         algorithm: Slug to name in the frame's title.
         workers: What the user asked for, so the title is right before the corpus is probed.
+        source: Folder being scanned, and
+        out: folder being written — shown inside the frame because the lines that announced them
+            are on the other screen for as long as the run lasts.
     """
 
-    def __init__(self, algorithm: str = "", workers: int = 1) -> None:
+    def __init__(self, algorithm: str = "", workers: int = 1, source: str = "",
+                 out: str = "") -> None:
         self._algorithm = algorithm or "scan"
+        self._where = f"{source}  →  {out}" if source and out else (source or out)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._drawn = 0
         self._hidden = False
 
         self._started = time.time()
@@ -116,6 +164,11 @@ class TuiDisplay:
         self._phases: dict[str, float] = {}
         self._by_status: dict[str, int] = {}
         self._recent: deque[tuple[str, str, str]] = deque(maxlen=_RECENT)
+        # Set by `hold`: the run is over, the clock stops, and the closing metrics take the place of
+        # the live stage block until the reader quits.
+        self._finished = False
+        self._ended = 0.0
+        self._metrics: list[list[str]] = []
         # ``(kind, text)`` — a per-file failure and a run-wide warning read differently on the way
         # out, and both have to survive the frame being wiped off the screen.
         self._problems: list[tuple[str, str]] = []
@@ -130,7 +183,7 @@ class TuiDisplay:
             self._files_total = files
             self._audio_total = audio_sec
             self._started = time.time()
-        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.write(_ENTER_SCREEN + HIDE_CURSOR)
         self._hidden = True
         self._stop.clear()
         self._thread = threading.Thread(target=self._tick, daemon=True)
@@ -191,6 +244,72 @@ class TuiDisplay:
         with self._lock:
             self._problems.append(("warning", message))
 
+    def hold(self, metrics: list[list[str]]) -> None:
+        """Freeze the finished run on screen, add its metrics, and wait to be dismissed.
+
+        A run that wiped its own panel the moment it finished would take the answer with it — the
+        stages, the lanes, what was found, all gone half a second after the last recording landed.
+        So the frame stays, the clock stops, the closing table takes the place of the live stage
+        block, and nothing happens until the reader presses Ctrl-Q.
+
+        Blocking is the point, and it is safe: this runs on the main thread after
+        :func:`siarapp.runner.run_folder` has returned, so there is no work left to hold up. Ctrl-C
+        still interrupts, and the summary prints on the ordinary screen either way.
+
+        Args:
+            metrics: ``[label, value, share]`` rows from the closing summary — passed in rather
+                than computed here, because this module draws and the command decides what a run
+                cost.
+        """
+        if not self._hidden:
+            return
+        with self._lock:
+            self._metrics = [list(row) for row in metrics]
+            self._finished = True
+            self._ended = time.time()
+            self._draw(self._render(self._ended))
+        self._wait_for_quit()
+
+    def _wait_for_quit(self) -> None:
+        """Block until Ctrl-Q, ``q``, or end of input.
+
+        The terminal is put in cbreak mode so a single keystroke arrives without a newline, and
+        ``IXON`` is cleared for the duration: Ctrl-Q is XON to the line discipline, which would
+        swallow it as flow control before this ever saw it. Interrupts are left enabled, so Ctrl-C
+        still stops the program the way it does everywhere else.
+
+        Returns immediately when stdin is not a terminal — a scripted run has nobody to press a
+        key, and waiting forever for one would hang a survey in a cron job.
+        """
+        try:
+            if not sys.stdin.isatty():
+                return
+        except (AttributeError, ValueError):
+            return
+        if termios is None or tty is None:
+            # No POSIX terminal control (Windows): the panel has been drawn, and holding the run
+            # open with no way to read a keypress would be worse than closing it.
+            return
+
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            mode = termios.tcgetattr(fd)
+            mode[0] &= ~termios.IXON
+            termios.tcsetattr(fd, termios.TCSANOW, mode)
+            while True:
+                key = sys.stdin.buffer.read(1)
+                if not key or key in _QUIT_KEYS:
+                    return
+        except (OSError, termios.error):
+            return
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except (OSError, termios.error):
+                pass
+
     def close(self) -> None:
         """Stop drawing, give the terminal back, and leave the problems in the scrollback."""
         self._stop.set()
@@ -198,9 +317,7 @@ class TuiDisplay:
             self._thread.join(timeout=1.0)
             self._thread = None
         if self._hidden:
-            with self._lock:
-                self._erase()
-            sys.stdout.write(SHOW_CURSOR)
+            sys.stdout.write(SHOW_CURSOR + _LEAVE_SCREEN)
             sys.stdout.flush()
             self._hidden = False
         for kind, text in self._problems:
@@ -215,24 +332,24 @@ class TuiDisplay:
             self._lanes.extend([None] * (lane + 1 - len(self._lanes)))
             self._workers = len(self._lanes)
 
-    def _erase(self) -> None:
-        """Take the frame off the screen. Caller holds the lock."""
-        if self._drawn:
-            sys.stdout.write(f"\033[{self._drawn}A\033[J")
-            self._drawn = 0
-
     def _tick(self) -> None:
         while not self._stop.wait(_TICK_SEC):
             with self._lock:
+                # Redrawn even while held, so a window resized after the run still looks right.
                 self._draw(self._render(time.time()))
 
     def _draw(self, lines: list[str]) -> None:
-        """Redraw the frame in place. Caller holds the lock."""
-        out = [f"\033[{self._drawn}A"] if self._drawn else []
-        out += [f"\r\033[K{line}\n" for line in lines]
-        sys.stdout.write("".join(out))
+        """Repaint the screen from the top left. Caller holds the lock.
+
+        Home the cursor, clear each line as it is written, then clear whatever is below — so the
+        frame needs no bookkeeping about how tall it was last time, and a terminal resized mid-run
+        redraws correctly on the next tick rather than tearing.
+
+        No trailing newline: a newline written on the bottom line of the screen scrolls it, and a
+        scrolled screen is one the next repaint would draw in the wrong place.
+        """
+        sys.stdout.write("\033[H" + "\n".join(f"\033[K{line}" for line in lines) + "\033[J")
         sys.stdout.flush()
-        self._drawn = len(lines)
 
     def _cost_rate(self) -> float:
         """Wall seconds one worker spends per second of audio, or ``0.0`` before it is known."""
@@ -241,16 +358,22 @@ class TuiDisplay:
         return self._scan_wall / self._scan_audio
 
     def _render(self, now: float) -> list[str]:
-        """The whole frame, sized to the terminal as it is at this tick.
+        """The whole screen, exactly as many lines and columns as the terminal has.
 
-        Sections are added while there is room and dropped from the bottom up when there is not:
-        the bar and the totals are the two lines somebody watching actually needs, and a frame that
-        overflowed the window would scroll — which breaks redrawing in place and leaves torn copies
-        of itself up the screen.
+        The frame is the window: it fills the width, it fills the height, and the last section is
+        stretched to reach the bottom rule rather than leaving the lower half of the screen empty.
+
+        Sections are dropped from the least useful up when the terminal is too short for all of
+        them — the bar and the totals are the two lines somebody watching actually needs.
         """
-        width = min(terminal_width(), 120)
+        # A finished run is reported against the moment it finished, however long the panel is then
+        # left on screen: "finished in 4:12" is a fact about the run, not about the reader.
+        if self._finished:
+            now = self._ended
+        size = shutil.get_terminal_size((100, 24))
+        width = max(40, size.columns)
         inner = width - 4
-        height = max(8, shutil.get_terminal_size((100, 24)).lines - 1)
+        height = max(_MIN_HEIGHT, size.lines)
         elapsed = max(0.0, now - self._started)
 
         block = progress_block(
@@ -265,46 +388,74 @@ class TuiDisplay:
         )
 
         head = f"{self._algorithm} · {self._workers} worker{'' if self._workers == 1 else 's'}"
-        lines = [_top(head, f"{clock(elapsed)} elapsed", width)]
-        lines.append(_row(self._bar_line(block, inner), inner))
-        lines.append(_row(self._totals_line(block, elapsed, inner), inner))
+        body = [
+            _row(self._bar_line(block, inner), inner),
+            _row(self._totals_line(block, elapsed, inner), inner),
+        ]
+        if self._where:
+            body.append(_row(paint(fit_path(self._where, inner), DIM), inner))
 
-        # What is left after the frame's own furniture, which is the two rules plus the two lines
-        # above. Every section below asks for its rule as well as its rows.
-        budget = height - _FRAME_OVERHEAD
+        # Everything between the two rules. Sections are taken while they fit; a section that does
+        # not is skipped rather than ending the loop, so a small important one still lands when a
+        # large one above it could not.
+        room = height - 2 - len(body)
         for section in self._sections(inner, now):
-            if len(section) <= budget:
-                lines.extend(section)
-                budget -= len(section)
-        lines.append("╰" + "─" * (width - 2) + "╯")
+            if len(section) <= room:
+                body.extend(section)
+                room -= len(section)
+
+        # A held panel keeps a line back for its footer before anything else claims the space: it is
+        # the only thing on screen saying the run is waiting for a keypress rather than still
+        # working, and a reader who cannot find that has a terminal that looks wedged.
+        keep = 1 if self._finished else 0
+
+        # What is left goes to the completions, which are the one section with no natural length:
+        # a rule plus as many of the most recent as reach the bottom of the screen.
+        if room - keep > 2 and self._recent:
+            rows = self._recent_lines(inner, room - keep - 1)
+            body.append(_rule("just finished", inner))
+            body.extend(_row(line, inner) for line in rows)
+            room -= 1 + len(rows)
+
+        # The last line is the one worth reading at that moment: how to stop a run that is going, or
+        # how to dismiss one that has finished. A small run has less history than screen, and blank
+        # rows to the bottom would otherwise look like the panel gave up.
+        footer = paint(_HELD_FOOTER, BOLD) if self._finished else paint(_FOOTER, DIM)
+        if room >= 2:
+            body.extend(_row("", inner) for _ in range(room - 1))
+            body.append(_row(footer, inner))
+        elif room >= 1:
+            body.append(_row(footer, inner))
+
+        clocked = f"finished in {clock(elapsed)}" if self._finished else f"{clock(elapsed)} elapsed"
+        lines = [_top(head, clocked, width)]
+        lines += body[: height - 2]
+        lines.append(paint("╰" + "─" * (width - 2) + "╯", DIM))
         return lines
 
     def _sections(self, inner: int, now: float) -> list[list[str]]:
-        """The optional parts of the frame, in the order they are worth keeping.
+        """The fixed-length parts of the frame, in the order they are worth keeping.
 
         Stages and shapes first — they are the reason this display exists — then the workers, then
-        the problems, then what just finished, which is the one section the counters above already
-        summarise and so the one worth losing first on a short terminal.
+        the problems. What just finished is not here: it has no length of its own and is built last,
+        to fill whatever these leave.
 
         Each is returned complete with its rule, so a section is either drawn or not: a rule with
-        nothing under it is worse than a missing section. A section that does not fit is skipped
-        rather than ending the loop, so a small important one still lands when a large one above it
-        could not.
+        nothing under it is worse than a missing section.
         """
         out = []
-        body = self._stage_shape_block(inner)
-        if body:
-            out.append(body)
-        lanes = self._lane_lines(inner, now)
+        block = self._stage_shape_block(inner)
+        if block:
+            out.append(block)
+        # Idle lanes on a finished run say nothing: the closing metrics have the space instead.
+        lanes = [] if self._finished else self._lane_lines(inner, now)
         if lanes:
             out.append([_rule("workers", inner)] + [_row(line, inner) for line in lanes])
         if self._problems:
             shown = self._problems[-_PROBLEMS:]
             out.append([_rule("problems", inner)]
-                       + [_row(f"! {text}", inner) for _kind, text in shown])
-        if self._recent:
-            out.append([_rule("just finished", inner)]
-                       + [_row(line, inner) for line in self._recent_lines(inner)])
+                       + [_row(paint(f"! {text}", RED if kind == "error" else YELLOW), inner)
+                          for kind, text in shown])
         return out
 
     def _bar_line(self, block: dict, inner: int) -> str:
@@ -316,23 +467,32 @@ class TuiDisplay:
         # than a fixed one with an acre of blank beside it.
         bar_width = max(8, inner - len(counts) - len(audio) - 12)
         filled = int(round(max(0.0, min(1.0, fraction)) * bar_width))
-        drawn = "█" * filled + "░" * (bar_width - filled)
-        return f"{drawn} {fraction * 100:3.0f}%  {counts}  {audio}"
+        drawn = paint("█" * filled, GREEN) + paint("░" * (bar_width - filled), DIM)
+        return (f"{drawn} {paint(f'{fraction * 100:3.0f}%', BOLD)}  "
+                f"{counts}  {paint(audio, DIM)}")
 
     def _totals_line(self, block: dict, elapsed: float, inner: int) -> str:
         """The one line to read if you only read one: speed, when it ends, what it has found."""
         eta = block["eta_sec"]
         factor = realtime_factor(self._audio_worked, elapsed)
+        # Green above realtime, amber below it: under 1x an overnight scan does not finish
+        # overnight, and that is worth seeing before the morning.
+        speed = paint(factor_text(factor), GREEN if factor >= 1 else YELLOW)
+        if self._finished:
+            when = paint("finished", GREEN)
+        else:
+            when = "estimating" if eta is None else f"{clock(eta)} left"
         parts = [
-            f"{factor_text(factor)} realtime",
-            "estimating" if eta is None else f"{clock(eta)} left",
-            f"{self._structures:,} structure{'' if self._structures == 1 else 's'}",
+            f"{speed} realtime",
+            when,
+            f"{paint(f'{self._structures:,}', BOLD)} "
+            f"structure{'' if self._structures == 1 else 's'}",
         ]
-        for status, label in (("skipped", "skipped"), ("too_short", "too short"),
-                              ("error", "error")):
+        for status, label, style in (("skipped", "skipped", DIM), ("too_short", "too short", DIM),
+                                     ("error", "error", RED)):
             if self._by_status.get(status):
-                parts.append(f"{self._by_status[status]:,} {label}")
-        return "  ·  ".join(parts)[:inner]
+                parts.append(paint(f"{self._by_status[status]:,} {label}", style))
+        return paint("  ·  ", DIM).join(parts)
 
     def _stage_shape_block(self, inner: int) -> list[str]:
         """Where the time went, and what came out — side by side when the terminal is wide enough.
@@ -340,10 +500,11 @@ class TuiDisplay:
         Stacked below that width rather than squeezed: two bars and two labels in forty columns is
         four things competing for the same eight characters, and none of them stays readable.
         """
-        stages = self._stage_lines()
+        stages = self._metric_lines() if self._finished else self._stage_lines()
         shapes = self._shape_lines()
         if not stages and not shapes:
             return []
+        title = "performance" if self._finished else "time by stage"
 
         if inner >= _TWO_COLUMN_MIN and stages and shapes:
             left = inner // 2 - 1
@@ -353,11 +514,11 @@ class TuiDisplay:
                 a = _pad(stages[i] if i < len(stages) else "", left)
                 b = _pad(shapes[i] if i < len(shapes) else "", right)
                 rows.append(_row(f"{a} │ {b}", inner))
-            return [_split_rule("time by stage", "structures found", left, inner)] + rows
+            return [_split_rule(title, "structures found", left, inner)] + rows
 
         out = []
         if stages:
-            out.append(_rule("time by stage", inner))
+            out.append(_rule(title, inner))
             out += [_row(line, inner) for line in stages]
         if shapes:
             out.append(_rule("structures found", inner))
@@ -380,12 +541,38 @@ class TuiDisplay:
         order = sorted(self._phases.items(), key=lambda kv: -kv[1])
         label_width = max(len(name) for name in PHASES)
         lines = []
-        for name, spent in order:
+        for rank, (name, spent) in enumerate(order):
             fraction = spent / measured
             filled = int(round(fraction * _MINI_BAR))
-            drawn = "█" * filled + "·" * (_MINI_BAR - filled)
-            lines.append(f"{name:<{label_width}}  {cost(spent):>8}  {drawn} "
-                         f"{share(spent, measured):>4}")
+            # The largest stage carries the accent: it is the row worth reading first, and on a
+            # healthy run it is `scan`.
+            drawn = (paint("█" * filled, CYAN if rank == 0 else DIM)
+                     + paint("·" * (_MINI_BAR - filled), DIM))
+            lines.append(f"{name:<{label_width}}  {paint(f'{cost(spent):>8}', BOLD)}  {drawn} "
+                         f"{paint(f'{share(spent, measured):>4}', DIM)}")
+        return lines
+
+    def _metric_lines(self) -> list[str]:
+        """The closing metrics, as rows: the same table the summary prints, in the panel.
+
+        Drawn from the rows handed to :meth:`hold`, so the panel and the summary printed underneath
+        it cannot disagree — they are one table rendered twice. Indented labels (the stage rows) keep
+        their indent, which is what makes them read as belonging to the wall time above them.
+        """
+        if not self._metrics:
+            return []
+        width = max(visible_len(row[0]) for row in self._metrics)
+        lines = []
+        for label, value, part in self._metrics:
+            # A stage row is indented; it is detail under the total above it, so it is dimmed and
+            # its total is not emboldened.
+            stage = label.startswith("  ")
+            cells = [f"{label:<{width}}", f"{value:>9}", f"{part:>4}"]
+            lines.append("  ".join((
+                paint(cells[0], DIM) if stage else cells[0],
+                cells[1] if stage else paint(cells[1], BOLD),
+                paint(cells[2], DIM),
+            )))
         return lines
 
     def _shape_lines(self) -> list[str]:
@@ -396,10 +583,11 @@ class TuiDisplay:
         top = order[0][1] or 1
         label_width = max(len(name) for name, _ in order)
         lines = []
-        for shape, n in order:
+        for rank, (shape, n) in enumerate(order):
             filled = int(round(_MINI_BAR * n / top))
-            drawn = "█" * filled + "·" * (_MINI_BAR - filled)
-            lines.append(f"{shape:<{label_width}}  {n:>7,}  {drawn}")
+            drawn = (paint("█" * filled, CYAN if rank == 0 else DIM)
+                     + paint("·" * (_MINI_BAR - filled), DIM))
+            lines.append(f"{shape:<{label_width}}  {paint(f'{n:>7,}', BOLD)}  {drawn}")
         return lines
 
     def _lane_lines(self, inner: int, now: float) -> list[str]:
@@ -416,7 +604,7 @@ class TuiDisplay:
         for lane, entry in enumerate(self._lanes):
             label = f"{lane + 1:>3}  "
             if entry is None:
-                lines.append(f"{label}{'·' * _LANE_BAR}   idle")
+                lines.append(f"{label}{paint('·' * _LANE_BAR + '   idle', DIM)}")
                 continue
             _index, rel_path, seconds, started_at = entry
             spent = now - started_at
@@ -424,26 +612,29 @@ class TuiDisplay:
             if estimate > 0:
                 pct = min(BAR_CAP, 100.0 * spent / estimate)
                 filled = int(round(_LANE_BAR * pct / 100.0))
-                stat = f"{'█' * filled}{'░' * (_LANE_BAR - filled)} {pct:3.0f}% {spent:5.0f}s"
+                stat = (paint("█" * filled, GREEN) + paint("░" * (_LANE_BAR - filled), DIM)
+                        + f" {pct:3.0f}% {spent:5.0f}s")
             else:
                 # Nothing has finished yet, so there is no throughput to predict with. Elapsed
                 # alone: an estimate drawn before the first result is invention.
-                stat = f"{'░' * _LANE_BAR}   —  {spent:5.0f}s"
-            lines.append(f"{label}{stat}  {fit_path(rel_path, inner - len(label + stat) - 2)}")
+                stat = paint("░" * _LANE_BAR, DIM) + f"   —  {spent:5.0f}s"
+            room = inner - len(label) - visible_len(stat) - 2
+            lines.append(f"{label}{stat}  {fit_path(rel_path, room)}")
         return lines
 
-    def _recent_lines(self, inner: int) -> list[str]:
-        """The last few recordings to land, newest at the top.
+    def _recent_lines(self, inner: int, limit: int) -> list[str]:
+        """The recordings that have landed, newest first, as many as ``limit`` allows.
 
         The outcome sits in a column just past the longest path rather than against the right edge:
         on a wide terminal a run of short names would put every count eighty characters from the
         name it belongs to.
         """
-        if not self._recent:
-            return []
         room = min(_RECENT_PATH, max(12, inner - _RECENT_TAIL - 4))
-        return [f"{mark} {fit_path(rel_path, room):<{room}}  {clip(tail, _RECENT_TAIL)}"
-                for mark, rel_path, tail in self._recent]
+        rows = list(self._recent)[: max(0, limit)]
+        marks = {"✓": GREEN, "✗": RED, "·": DIM}
+        return [f"{paint(mark, marks.get(mark, DIM))} {fit_path(rel_path, room):<{room}}  "
+                f"{paint(fit_path(tail, _RECENT_TAIL), DIM if mark != '✗' else RED)}"
+                for mark, rel_path, tail in rows]
 
 
 def _top(title: str, right: str, width: int) -> str:
@@ -452,16 +643,19 @@ def _top(title: str, right: str, width: int) -> str:
     The title is cut before the clock is: on a narrow terminal the elapsed time is the half worth
     keeping, and a rule one character too long would wrap and break the redraw.
     """
-    tail = f" {right} ─╮"
-    room = width - len(tail) - 4
-    left = f"╭─ {clip(title, max(0, room))} "
-    return f"{left}{'─' * max(0, width - len(left) - len(tail))}{tail}"
+    plain_tail = f" {right} ─╮"
+    room = width - len(plain_tail) - 4
+    name = fit_path(title, max(0, room))
+    fill = "─" * max(0, width - len(name) - len(plain_tail) - 4)
+    return (paint("╭─ ", DIM) + paint(name, BOLD) + " " + paint(fill, DIM)
+            + paint(" ", DIM) + paint(right, DIM) + paint(" ─╮", DIM))
 
 
 def _rule(title: str, inner: int) -> str:
     """A section rule across the frame, titled."""
-    text = f"├─ {clip(title, max(0, inner - 2))} "
-    return f"{text}{'─' * max(0, inner + 3 - len(text))}┤"
+    name = fit_path(title, max(0, inner - 2))
+    fill = "─" * max(0, inner - len(name) - 1)
+    return paint(f"├─ {name} {fill}┤", DIM)
 
 
 def _split_rule(left_title: str, right_title: str, left: int, inner: int) -> str:
@@ -480,16 +674,15 @@ def _split_rule(left_title: str, right_title: str, left: int, inner: int) -> str
             elif start > divider and start + offset < len(chars) - 1:
                 chars[start + offset] = char
     chars[divider] = "┬"
-    return "".join(chars)
+    return paint("".join(chars), DIM)
 
 
 def _row(text: str, inner: int) -> str:
     """One line of frame content, padded and clipped to the frame's inside width."""
-    return f"│ {_pad(text, inner)} │"
+    edge = paint("│", DIM)
+    return f"{edge} {fit(text, inner)} {edge}"
 
 
 def _pad(text: str, width: int) -> str:
-    """Fit text to exactly ``width`` columns, clipping with an ellipsis when it is too long."""
-    if len(text) > width:
-        return text[: max(0, width - 1)] + "…"
-    return text + " " * (width - len(text))
+    """Fit text to exactly ``width`` visible columns. Colour codes cost nothing."""
+    return fit(text, width)

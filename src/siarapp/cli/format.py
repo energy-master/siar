@@ -13,19 +13,35 @@ it is testable by calling it.
 """
 from __future__ import annotations
 
+import os
+import re
+import sys
+
 __all__ = [
     "BAR_CAP",
     "BAR_WIDTH",
+    "BOLD",
+    "CYAN",
+    "DIM",
+    "GREEN",
     "HIDE_CURSOR",
+    "RED",
+    "RESET",
     "SHOW_CURSOR",
+    "YELLOW",
     "bar",
     "clip",
     "clock",
+    "colour_enabled",
     "cost",
     "duration",
     "factor_text",
+    "fit",
     "fit_path",
+    "set_colour",
     "share",
+    "paint",
+    "visible_len",
 ]
 
 #: Width of the download and progress bars, in characters.
@@ -38,6 +54,102 @@ BAR_CAP = 99.0
 #: Terminal control: hide the cursor while a panel is redrawing under it.
 HIDE_CURSOR = "\033[?25l"
 SHOW_CURSOR = "\033[?25h"
+
+
+# -- colour ----------------------------------------------------------------------------------
+#
+# Sparingly, and never as the only thing carrying a meaning: a red row also says ERROR, a green bar
+# is also longer. Someone reading this over ssh in a monochrome terminal, or piping it into a log,
+# must lose nothing but the colour.
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+#: Cached decision from :func:`colour_enabled`. ``None`` until something first asks.
+_COLOUR: bool | None = None
+
+
+def colour_enabled() -> bool:
+    """Whether to emit colour: a terminal, and nobody having asked us not to.
+
+    Honours ``NO_COLOR`` (any value, per the informal standard) and ``TERM=dumb``, because the one
+    thing worse than no colour is escape codes in a log file.
+    """
+    global _COLOUR
+    if _COLOUR is None:
+        _COLOUR = bool(
+            sys.stdout.isatty()
+            and not os.environ.get("NO_COLOR")
+            and os.environ.get("TERM", "") != "dumb"
+        )
+    return _COLOUR
+
+
+def set_colour(enabled: bool | None) -> None:
+    """Force colour on or off, or ``None`` to decide again from the environment."""
+    global _COLOUR
+    _COLOUR = None if enabled is None else bool(enabled)
+
+
+def paint(text: str, *codes: str) -> str:
+    """Wrap text in SGR codes, or return it untouched when colour is off.
+
+    Args:
+        text: What to colour. Padding belongs *inside* this argument — ``paint(f"{x:<8}", DIM)``,
+            not ``f"{paint(x, DIM):<8}"`` — because a format spec counts escape characters as
+            width and would pad the column short.
+        codes: Style constants from this module.
+
+    Returns:
+        The text, decorated and reset, or exactly the text given.
+    """
+    if not codes or not colour_enabled():
+        return text
+    return "".join(codes) + text + RESET
+
+
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def visible_len(text: str) -> int:
+    """How many columns text occupies once its colour codes are discounted."""
+    return len(_SGR.sub("", text))
+
+
+def fit(text: str, width: int) -> str:
+    """Cut or pad text to exactly ``width`` visible columns, colour codes and all.
+
+    Every row of a redrawn panel has to be the same width or the frame tears, and a naive ``len``
+    counts escape sequences as if they were letters. This walks the string instead: escapes are
+    copied through and cost nothing, printable characters cost one each, and anything cut is
+    followed by a reset so a colour never leaks into the rest of the line.
+    """
+    if width <= 0:
+        return ""
+    coloured = bool(_SGR.search(text))
+    tail = RESET if coloured else ""
+    seen = visible_len(text)
+    if seen <= width:
+        return text + tail + " " * (width - seen)
+
+    out: list[str] = []
+    kept = 0
+    i = 0
+    while i < len(text) and kept < width - 1:
+        match = _SGR.match(text, i)
+        if match:
+            out.append(match.group())
+            i = match.end()
+            continue
+        out.append(text[i])
+        kept += 1
+        i += 1
+    return "".join(out) + "…" + tail
 
 
 def bar(fraction: float, width: int = BAR_WIDTH) -> str:

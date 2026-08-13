@@ -249,7 +249,7 @@ Useful flags:
 | Flag | Why |
 |---|---|
 | `--parallel` | Scan several recordings at once, one process per core. The single biggest lever on a large corpus. |
-| `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. |
+| `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. Holds the finished run on screen until Ctrl-Q. |
 | `--resume` | Carry on where an interrupted run stopped. Safe to pass always. |
 | `--limit 20` | Trial the algorithm on twenty files before committing to a corpus. |
 | `--link` | Hardlink the audio into the output folder instead of copying it. Same filesystem only; falls back to a copy. |
@@ -323,6 +323,7 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 ├─ just finished ───────────────────────────────────────────────────────────────────┤
 │ ✓ station-a/2026-07-03/0400.wav                             37 structures         │
 │ ✓ station-c/2026-07-02/2350.wav                             12 structures         │
+│ Ctrl-C leaves a usable folder — --resume picks it up where it stopped.            │
 ╰───────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -331,9 +332,22 @@ in the algorithm — where it should — or in the thumbnails, and both cures ar
 stay on screen instead of scrolling past, and are reprinted as ordinary lines when the panel comes
 down, so nothing is lost to a wiped frame.
 
-The panel is sized to the terminal on every redraw and sections are dropped from the bottom when
-it is too short, so a small window still shows the bar and the totals. It needs a terminal: piped
-into a log, `--tui` falls back to one line per recording and says so.
+It takes the screen — the alternate buffer, the one `vim` and `less` use — and fills the terminal's
+full width and height, repainted from the top left on every tick, in colour where the terminal has
+it. Resize the window mid-run and the next tick draws it at the new size.
+
+**When the run finishes the panel stays up**, with the closing metrics in place of the live stage
+block, and waits: the clock stops, the lanes go, and the last line says `Ctrl-Q (or q) to close
+this panel`. A panel that wiped itself the moment the last recording landed would take the answer
+with it. Press it and the buffer is handed back untouched — your shell looks exactly as it did,
+with the same summary printed under the command that started the run, so it is in the scrollback
+too.
+
+Sections are dropped in a fixed order when the window is too short, so a small one still shows the
+bar and the totals, and the completions list stretches to reach the bottom rule so a tall one is
+full of run rather than empty below the middle. Colour is never the only thing carrying a meaning —
+a red row also says ERROR, a green bar is also longer — and `NO_COLOR` or `TERM=dumb` turns it off.
+It needs a terminal: piped into a log, `--tui` falls back to one line per recording and says so.
 
 ## 5. Open the result in IDent Dynamics
 
@@ -639,7 +653,7 @@ else stays a string. An algorithm that wanted a float should not receive `"2.5"`
 | `--limit N` | stop after N recordings — a trial run over a big corpus |
 | `--parallel [N]` | scan N recordings at once, one process each; bare `--parallel` uses every core the machine's memory will hold |
 | `--no-recursive` | only the top level of the folder |
-| `--tui` | draw the whole run in one live panel — [see above](#watching-a-long-run---tui). Needs a terminal |
+| `--tui` | draw the whole run in one live panel, held at the end until Ctrl-Q — [see above](#watching-a-long-run---tui). Needs a terminal |
 | `--quiet`, `-q` | no per-file progress |
 
 The first run of an algorithm downloads it and displays a progress bar:

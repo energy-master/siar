@@ -191,7 +191,7 @@ $ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paral
 --- slide ---
 title: Watch a long run
 rail: Watch a long run
-note: ~--tui~ draws the **whole run in one panel**, redrawn in place: how far through it is, where the time is going, what it is finding, a row per worker, and any failures kept on screen rather than scrolling past. The stage block is the reason to use it — an hour in it says whether the time is going into the algorithm, where it should, or into the thumbnails.
+note: ~--tui~ gives the run **the whole screen** — the alternate buffer, like ~vim~ — cleared and repainted every quarter second: how far through it is, where the time is going, what it is finding, a row per worker, and any failures kept on screen rather than scrolling past. The stage block is the reason to use it: an hour in it says whether the time is going into the algorithm, where it should, or into the thumbnails. When the run finishes the panel **stays up** with the closing metrics in it and waits for **Ctrl-Q**, so the answer does not vanish with the last recording. Quitting hands your shell back exactly as it was, with the same summary in the scrollback.
 term:
 $ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --parallel --tui
 . ╭─ all_structures · 12 workers ──────────────────── 5:24:11 elapsed ─╮
@@ -207,7 +207,7 @@ $ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paral
 . │   3  ············   idle                                           │
 . ╰────────────────────────────────────────────────────────────────────╯
 
-. # Needs a terminal. Piped into a log it falls back to one line per recording.
+. # Ctrl-Q closes the finished panel. Piped into a log it falls back to one line per recording.
 
 --- slide ---
 title: Peek at the result
