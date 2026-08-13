@@ -61,7 +61,7 @@ rail: Check the build platform tag
 note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
 term:
 $ siar-app version
-siar-app 0.2.0
+siar-app 0.3.0
 ! platform     linux-x86_64-cp313
 python       3.13.1
 licence      MIT (not yet accepted)
@@ -155,9 +155,24 @@ $ siar-app run ~/survey-audio --algorithm all_structures --out ~/survey-scan
 . output     /home/user/survey-scan
 [412/412] station-c/2025-09-08T1400.wav: 37 structures
 
-412 file(s), 27.40 h of audio, in 1841.2s
-! 9,043 structures: 122 click_train, 4188 click, 219 sweep, 3901 tonal, 613 patch
-. 1 file(s) error
+. METRIC            VALUE
+- -------------  --------
+recordings          412
+. scanned             411
+. errors                1
+audio scanned   27.40 h
+wall time      30.7 min
+! realtime          53.6x
+. workers               1
+! structures        9,043
+
+. STRUCTURE    FOUND
+- -----------  -----
+click        4,188
+click_train    122
+patch          613
+sweep          219
+tonal        3,901
 
 --- slide ---
 title: Scan on every core
@@ -220,7 +235,7 @@ rail: Update / Delete application
 note: The token, licence, history and cached algorithms all survive an app upgrade.
 term:
 $ uv tool upgrade siar-app
-. Updated siar-app v0.1.0 -> v0.2.0
+. Updated siar-app v0.2.0 -> v0.3.0
 
 . # Installed from git, so uv compares version numbers. Same number, newer commit?
 $ uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git

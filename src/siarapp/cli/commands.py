@@ -51,7 +51,7 @@ from siarapp.licensing import (
 )
 from siarapp.grid import ScannerError
 from siarapp.io.audio import find_recordings, probe
-from siarapp.io.performance import progress_block
+from siarapp.io.performance import progress_block, realtime_factor
 from siarapp.loader import installed_algorithms, load_local, load_remote
 from siarapp.runner import RunOptions, run_folder
 
@@ -1302,8 +1302,76 @@ def _duration(seconds: float) -> str:
     return f"{seconds:.1f} s"
 
 
+def _factor_text(factor: float) -> str:
+    """A realtime factor as a multiple, at the precision the number deserves.
+
+    Two decimals below 10x and one above, because the interesting digit moves: 0.35x and 0.40x
+    are the difference between an overnight run and a two-day one, while 38.1x and 38.14x say the
+    same thing about the same machine.
+
+    Args:
+        factor: Audio seconds per wall second.
+
+    Returns:
+        The multiple, or ``"—"`` when there is nothing to state — a run that scanned no audio has
+        no speed, and printing ``0.00x`` for it claims one.
+    """
+    if factor <= 0:
+        return "—"
+    return f"{factor:.1f}x" if factor >= 10 else f"{factor:.2f}x"
+
+
+def _metric_rows(manifest: dict) -> list[list[str]]:
+    """The run's metrics, as table rows: how much was scanned, how long it took, what came out.
+
+    Args:
+        manifest: The finished run manifest from :func:`siarapp.runner.run_folder`.
+
+    Returns:
+        ``[label, value]`` pairs in reading order. Outcome rows other than ``scanned`` appear only
+        when they happened, so a clean run's table is not padded with three zeros.
+    """
+    by_status = manifest["by_status"]
+    elapsed = float(manifest["elapsed_sec"])
+    # Audio actually scanned, not the corpus total: a resumed run must not take credit for hours
+    # it skipped, and this is the same rule the performance JSON's realtime_factor follows.
+    audio_sec = sum(
+        float(row.get("duration_sec") or 0.0)
+        for row in manifest["manifest"]
+        if row.get("status") == "scanned"
+    )
+
+    rows = [["recordings", f"{manifest['files']:,}"]]
+    for status, label in (
+        ("scanned", "scanned"),
+        ("skipped", "skipped (resume)"),
+        ("too_short", "too short"),
+        ("error", "errors"),
+    ):
+        if by_status.get(status):
+            rows.append([label, f"{by_status[status]:,}"])
+
+    rows.append(["audio scanned", _duration(audio_sec)])
+    # Same unit as the audio row above, deliberately: the two numbers are only worth putting in
+    # one table if they can be compared by eye, and `_clock` would print a twelve-second trial as
+    # "0:12" against "12.0 s" of audio.
+    rows.append(["wall time", _duration(elapsed)])
+    # The number anyone planning a survey reads first: 3.0 means the scan ran three times faster
+    # than the audio it scanned, so an hour of recording cost twenty minutes.
+    rows.append(["realtime", _factor_text(realtime_factor(audio_sec, elapsed))])
+    workers = int(manifest.get("workers", 1))
+    rows.append(["workers", str(workers)])
+    if workers > 1:
+        # Per worker, because the pooled figure above is the one that flatters the machine and
+        # this is the one that says whether adding cores is still buying anything.
+        rows.append(["realtime per worker",
+                     _factor_text(realtime_factor(audio_sec, elapsed * workers))])
+    rows.append(["structures", f"{manifest['structures']:,}"])
+    return rows
+
+
 def _print_summary(manifest: dict, out_root: str) -> None:
-    """The closing report: what was found, and what to do with it."""
+    """The closing report: what the run cost, what was found, and what to do with it."""
     by_status = manifest["by_status"]
     scanned = by_status.get("scanned", 0)
     print()
@@ -1314,21 +1382,16 @@ def _print_summary(manifest: dict, out_root: str) -> None:
         print(f"Nothing to do — all {by_status['skipped']} file(s) were already scanned.")
         print("Drop --resume, or delete the output folder, to scan them again.")
     else:
-        workers = int(manifest.get("workers", 1))
-        print(
-            f"{manifest['files']} file(s), "
-            f"{_duration(manifest['audio_sec'])} of audio, "
-            f"in {manifest['elapsed_sec']:.1f}s"
-            + (f" on {workers} workers" if workers > 1 else "")
-        )
+        print(render_table(["METRIC", "VALUE"], _metric_rows(manifest), align=["<", ">"]))
+        print()
         if manifest["shapes"]:
-            found = ", ".join(f"{n} {shape}" for shape, n in manifest["shapes"].items())
-            print(f"{manifest['structures']} structures: {found}")
+            print(render_table(
+                ["STRUCTURE", "FOUND"],
+                [[shape, f"{n:,}"] for shape, n in manifest["shapes"].items()],
+                align=["<", ">"],
+            ))
         else:
             print("No structures found.")
-        for status in ("skipped", "too_short", "error"):
-            if by_status.get(status):
-                print(f"{by_status[status]} file(s) {status.replace('_', ' ')}")
     print()
     print(f"Output folder: {out_root}")
     print("Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.")

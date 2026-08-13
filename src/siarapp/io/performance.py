@@ -34,6 +34,7 @@ __all__ = [
     "PERFORMANCE_FORMAT",
     "performance_document",
     "progress_block",
+    "realtime_factor",
 ]
 
 #: Written at the root of every output folder.
@@ -190,7 +191,7 @@ def performance_document(
             "elapsed_sec": round(r.elapsed_sec, 3),
             # Per file as well as overall: one pathological recording in a folder of a thousand
             # is invisible in an average and obvious in a sorted column.
-            "realtime_factor": _factor(r.duration_sec, r.elapsed_sec),
+            "realtime_factor": realtime_factor(r.duration_sec, r.elapsed_sec),
             "count": r.count,
         }
         for r in results
@@ -220,21 +221,32 @@ def performance_document(
             # much of the pool was actually working.
             "wall_sec": round(wall, 2),
             "scan_sec": round(scan_sec, 2),
-            "realtime_factor": _factor(audio_sec, wall),
-            "scan_realtime_factor": _factor(audio_sec, scan_sec),
+            "realtime_factor": realtime_factor(audio_sec, wall),
+            "scan_realtime_factor": realtime_factor(audio_sec, scan_sec),
             "sec_per_file": round(wall / len(results), 3) if results else 0.0,
-            "throughput_audio_hours_per_hour": _factor(audio_sec, wall),
+            "throughput_audio_hours_per_hour": realtime_factor(audio_sec, wall),
         },
         "files": files,
     }
 
 
-def _factor(audio_sec: float, elapsed_sec: float) -> float:
+def realtime_factor(audio_sec: float, elapsed_sec: float) -> float:
     """Audio seconds per elapsed second, to two decimals. ``0.0`` when it cannot be computed.
+
+    Public because the CLI prints this number at the end of a run and the web app reads it out of
+    this document: one definition, so the line on the terminal and the field in the JSON can never
+    disagree about how fast the same run went.
 
     Zero rather than infinity for an instant scan: the JSON has to survive a round trip, and
     ``Infinity`` is not valid JSON — a reader that got one would fail on the whole document
     rather than on one row.
+
+    Args:
+        audio_sec: Audio actually processed, in seconds.
+        elapsed_sec: Wall time it took, in seconds.
+
+    Returns:
+        The multiple of realtime, or ``0.0`` if either side is non-positive.
     """
     if elapsed_sec <= 0 or audio_sec <= 0:
         return 0.0

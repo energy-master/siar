@@ -191,13 +191,34 @@ scanning   /home/you/survey-audio
 output     /home/you/survey-scan
 [412/412] station-c/2025-09-08T1400.wav: 37 structures
 
-412 file(s), 27.40 h of audio, in 1841.2s
-9,043 structures: 122 click_train, 4188 click, 219 sweep, 3901 tonal, 613 patch
-1 file(s) error
+METRIC            VALUE
+-------------  --------
+recordings          412
+scanned             411
+errors                1
+audio scanned   27.40 h
+wall time      30.7 min
+realtime          53.6x
+workers               1
+structures        9,043
+
+STRUCTURE    FOUND
+-----------  -----
+click        4,188
+click_train    122
+patch          613
+sweep          219
+tonal        3,901
 
 Output folder: /home/you/survey-scan
 Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.
 ```
+
+`realtime` is the row to plan with: 53.6x means the scan ran 53.6 times faster than the audio it
+scanned, so an hour of recording cost about a minute. It counts only audio this run actually
+scanned, so a `--resume` run is rated on the work it did rather than on the files it skipped, and
+on `--parallel` a second row gives the same figure per worker. The same numbers, per file, are in
+`siar-app-performance.json` at the root of the output folder.
 
 The first run downloads the algorithm and caches it under `~/.siar-app/algorithms/`. Every
 run after that is completely offline — useful on a vessel, required in a lab with no network.
@@ -312,7 +333,7 @@ Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.2.0 · © Vixen Intelligence 2026
+siar-app 0.3.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
@@ -323,7 +344,7 @@ invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 
 ```bash
 $ siar-app version
-siar-app 0.2.0
+siar-app 0.3.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
