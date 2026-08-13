@@ -25,7 +25,7 @@ everything on the open side of that line — the decode, the transform, the outp
 """
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from siarapp.api import ApiError, AuthError, Client, client_from_credentials
 from siarapp.grid import FrameGrid, Region, ScannerAlgorithm, ScannerError

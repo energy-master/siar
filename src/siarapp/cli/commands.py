@@ -11,6 +11,7 @@ one sentence telling them to log in again, not forty lines of urllib internals.
 """
 from __future__ import annotations
 
+import errno
 import getpass
 import json
 import os
@@ -37,7 +38,11 @@ from siarapp.cli.format import (
     duration,
     factor_text,
     fit_path,
+    human_bytes,
+    named_recording,
     share,
+    size_and_length,
+    stage_tag,
 )
 from siarapp.cli.table import render_table, terminal_width
 from siarapp.cli.tui import TuiDisplay
@@ -52,6 +57,7 @@ from siarapp.config import (
     legacy_env,
     load_credentials,
     read_json,
+    recent_cost,
     record_run,
     run_history,
     save_credentials,
@@ -66,6 +72,7 @@ from siarapp.licensing import (
 )
 from siarapp.grid import ScannerError
 from siarapp.io.audio import find_recordings, probe
+from siarapp.io.output import RUN_MANIFEST_NAME
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
 from siarapp.loader import installed_algorithms, load_local, load_remote
 from siarapp.runner import RunOptions, run_folder
@@ -81,6 +88,7 @@ __all__ = [
     "cmd_readme",
     "cmd_run",
     "cmd_runs",
+    "cmd_serve",
     "cmd_signup",
     "cmd_version",
     "cmd_whoami",
@@ -568,7 +576,7 @@ def cmd_installed(args: Namespace) -> int:
             r["slug"],
             r["version"],
             r["platform"],
-            _human_bytes(r["bytes"]),
+            human_bytes(r["bytes"]),
             _when(r["downloaded_at"]),
             "yes" if r["runnable"] else "no",
         ]
@@ -583,7 +591,7 @@ def cmd_installed(args: Namespace) -> int:
     print(render_table(headers, table, align=align))
     print()
     total = sum(r["bytes"] for r in rows)
-    print(f"{len(rows)} bundle(s), {_human_bytes(total)} in {os.path.join(home(), 'algorithms')}")
+    print(f"{len(rows)} bundle(s), {human_bytes(total)} in {os.path.join(home(), 'algorithms')}")
     if args.check and any(row[-1].endswith("available") for row in table):
         print("`siar-app run --refresh -a <name>` replaces a cached bundle with the newest.")
     return 0
@@ -613,18 +621,6 @@ def _when(epoch: int) -> str:
     if not epoch:
         return "—"
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch))
-
-
-def _human_bytes(n: int | None) -> str:
-    """Bytes at a human scale. KiB not kB: this is a file on a disk, not a link speed."""
-    if not n:
-        return "0 B"
-    size = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GiB"
 
 
 # -- feedback ---------------------------------------------------------------------------------
@@ -776,6 +772,7 @@ def cmd_run(args: Namespace) -> int:
         limit=args.limit,
         recursive=not args.no_recursive,
         workers=args.parallel,
+        max_bytes=args.max_size,
     )
 
     print(f"algorithm  {handle.slug} ({handle.platform})")
@@ -792,6 +789,7 @@ def cmd_run(args: Namespace) -> int:
             on_start=None if args.quiet else reporter.on_start,
             on_corpus=None if args.quiet else reporter.on_corpus,
             on_idle=None if args.quiet else reporter.on_idle,
+            on_stage=None if args.quiet else reporter.on_stage,
             # A display that owns the screen would draw over a warning printed from under it, so it
             # is offered the warning instead and decides where it goes.
             warn=getattr(reporter, "note", None) or _warn,
@@ -826,8 +824,29 @@ def cmd_run(args: Namespace) -> int:
         # Recorded because it is the difference between two otherwise identical rows: the same
         # corpus and the same algorithm, four hours apart or forty minutes.
         "workers": int(manifest.get("workers", 1)),
+        # The two figures the next run's display draws its first bars from, before it has
+        # measured anything of its own: audio scanned, and the wall time one worker spent on it.
+        # Kept as a pair rather than as their quotient so a later reader can see the weight
+        # behind the number — thirty seconds of audio is not evidence of much.
+        "audio_sec": round(_audio_scanned(manifest), 2),
+        "worker_sec": round(sum(float(r.get("elapsed_sec") or 0.0)
+                                for r in manifest["manifest"]), 2),
     })
     return 1 if manifest["by_status"].get("error") else 0
+
+
+def _audio_scanned(manifest: dict) -> float:
+    """Seconds of audio a run actually scanned.
+
+    Not the corpus total: a resumed run must not take credit for hours it skipped, and neither
+    must one that left oversized recordings out. The same rule the performance document's
+    ``realtime_factor`` follows, and the reason both agree.
+    """
+    return sum(
+        float(row.get("duration_sec") or 0.0)
+        for row in manifest.get("manifest", [])
+        if row.get("status") == "scanned"
+    )
 
 
 def _warn(message: str) -> None:
@@ -853,13 +872,19 @@ def _reporter(args: Namespace, slug: str, source: str = "", out_root: str = ""):
         source: Folder being scanned, and
         out_root: folder being written. Only ``--tui`` uses them, because it is the only display
             that hides the lines which announced them.
+
+    All three are handed the same seed: what this algorithm cost per second of audio the last
+    time it ran on this machine. Every one of them draws its bars from throughput, and every one
+    of them used to have none until the first recording finished — which on a corpus of hour-long
+    files meant an hour of screen with nothing moving on it.
     """
+    prior = recent_cost_rate(slug)
     if args.tui:
         if sys.stdout.isatty():
             return TuiDisplay(slug, workers=args.parallel if args.parallel > 0 else 1,
-                              source=source, out=out_root)
+                              source=source, out=out_root, prior_rate=prior)
         _warn("--tui needs a terminal; reporting one line per recording instead")
-    return WorkerPanel() if args.parallel != 1 else ScanReporter()
+    return WorkerPanel(prior) if args.parallel != 1 else ScanReporter(prior)
 
 
 def _resolve_algorithm(args: Namespace):
@@ -894,19 +919,19 @@ def _download_reporter(slug: str):
         if not tty:
             if not announced:
                 announced = True
-                size = f" ({_human_bytes(total)})" if total else ""
+                size = f" ({human_bytes(total)})" if total else ""
                 print(f"downloading {slug}{size}…")
             if total and done >= total:
-                print(f"downloaded  {slug} — {_human_bytes(done)}")
+                print(f"downloaded  {slug} — {human_bytes(done)}")
             return
         if total:
             fraction = done / total
             line = (f"downloading {slug}  {bar(fraction)} {fraction * 100:3.0f}%  "
-                    f"{_human_bytes(done)} / {_human_bytes(total)}")
+                    f"{human_bytes(done)} / {human_bytes(total)}")
         else:
             # No Content-Length: report what has arrived and skip the bar rather than animate
             # a fraction we would have to invent.
-            line = f"downloading {slug}  {_human_bytes(done)}"
+            line = f"downloading {slug}  {human_bytes(done)}"
         print(f"\r\033[K{line}", end="", flush=True)
         if total and done >= total:
             print()
@@ -976,15 +1001,18 @@ class ScanReporter:
     depends on the cursor going back, and without that every tick becomes another line.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, prior_rate: float = 0.0) -> None:
         self._tty = sys.stdout.isatty()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # Learned throughput: wall seconds spent per second of audio.
+        # Learned throughput: wall seconds spent per second of audio. Seeded from the last run of
+        # this algorithm on this machine, so the first recording gets a bar too.
+        self._prior = max(0.0, float(prior_rate))
         self._audio_sec = 0.0
         self._wall_sec = 0.0
-        self._current: tuple[int, int, str, float] | None = None
+        self._current: tuple[int, int, str, float, int] | None = None
+        self._stage = ""
         self._started_at = 0.0
 
     # -- the callbacks run_folder wants ----------------------------------------------------
@@ -995,13 +1023,19 @@ class ScanReporter:
     def on_idle(self, lane: int) -> None:
         """Nothing to do: a serial run has one lane and it is idle only when the run is over."""
 
+    def on_stage(self, lane: int, stage: str) -> None:
+        """The recording has moved on to another stage. One lane here, so ``lane`` is ignored."""
+        with self._lock:
+            self._stage = stage
+
     def on_start(self, index: int, total: int, rel_path: str, duration_sec: float,
-                 lane: int = 0) -> None:
+                 lane: int = 0, size_bytes: int = 0) -> None:
         """Begin reporting on a recording."""
         if not self._tty:
             return
         with self._lock:
-            self._current = (index, total, rel_path, duration_sec)
+            self._current = (index, total, rel_path, duration_sec, size_bytes)
+            self._stage = ""
             self._started_at = time.time()
         if self._thread is None:
             self._stop.clear()
@@ -1044,9 +1078,13 @@ class ScanReporter:
     # -- the live line ---------------------------------------------------------------------
 
     def _rate(self) -> float | None:
-        """Wall seconds per second of audio, or ``None`` before anything has been scanned."""
+        """Wall seconds per second of audio, or ``None`` when there is nothing to go on.
+
+        This run's own measurement first; the last run of the same algorithm otherwise, which is
+        what puts a bar on the very first recording instead of forty minutes of ``scanning…``.
+        """
         if self._audio_sec <= 0 or self._wall_sec <= 0:
-            return None
+            return self._prior or None
         return self._wall_sec / self._audio_sec
 
     def _tick(self) -> None:
@@ -1056,22 +1094,34 @@ class ScanReporter:
                 if current is None:
                     continue
                 elapsed = time.time() - self._started_at
-                print(f"\r\033[K{self._render(current, elapsed)}", end="", flush=True)
+                line = self._render(current, elapsed, self._stage)
+                print(f"\r\033[K{clip(line, terminal_width())}", end="", flush=True)
 
-    def _render(self, current: tuple[int, int, str, float], elapsed: float) -> str:
-        index, total, rel_path, seconds = current
+    def _render(self, current: tuple[int, int, str, float, int], elapsed: float,
+                stage: str = "") -> str:
+        """The live line: which recording, how big it is, what is happening to it, how far in.
+
+        The size and the length are the two facts that make a slow recording explicable rather
+        than worrying — a lane sitting at 40% for ten minutes reads quite differently once it
+        says the file is 3.4 GiB of 2.10 h audio — and the stage says which part of the work is
+        taking the time while it happens, not afterwards in the closing table.
+        """
+        index, total, rel_path, seconds, size_bytes = current
         head = f"[{index}/{total}] {rel_path}"
+        if size_bytes or seconds > 0:
+            head += f"  {size_and_length(size_bytes, seconds)}"
+        head += f"  {stage_tag(stage)}"
         rate = self._rate()
         if rate is None or seconds <= 0:
             # First recording of the run, or a header that would not read: elapsed alone. It
             # says the run is alive, which is the whole job until there is something to predict.
-            return f"{head}  scanning… {elapsed:.0f}s"
+            return f"{head} {elapsed:.0f}s"
 
         estimate = seconds * rate
         pct = min(BAR_CAP, 100.0 * elapsed / estimate) if estimate > 0 else 0.0
         filled = int(round(BAR_WIDTH * pct / 100.0))
         drawn = "█" * filled + "░" * (BAR_WIDTH - filled)
-        return f"{head}  {drawn} {pct:2.0f}%  {elapsed:.0f}s of ~{estimate:.0f}s"
+        return f"{head} {drawn} {pct:2.0f}%  {elapsed:.0f}s of ~{estimate:.0f}s"
 
 
 #: Lane bar width in the worker panel. Narrower than the download bar because there is one per
@@ -1106,13 +1156,20 @@ class WorkerPanel:
     to one line per recording with the lane number on it, which is what a log wants anyway.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, prior_rate: float = 0.0) -> None:
         self._tty = sys.stdout.isatty()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # What the last run of this algorithm cost per second of audio, from the run history.
+        # Only ever a seed: every bar switches to this run's own figure as soon as one file lands.
+        self._prior = max(0.0, float(prior_rate))
         self._workers = 1
         self._lanes: list[tuple | None] = []
+        # Per lane, so a worker that is slower than its neighbours is visible as a number and not
+        # only as a bar that moves less.
+        self._lane_audio: dict[int, float] = {}
+        self._lane_wall: dict[int, float] = {}
         self._started = 0.0
         self._files_total = 0
         self._audio_total = 0.0
@@ -1153,18 +1210,26 @@ class WorkerPanel:
         self._thread.start()
 
     def on_start(self, index: int, total: int, rel_path: str, duration_sec: float,
-                 lane: int = 0) -> None:
+                 lane: int = 0, size_bytes: int = 0) -> None:
         """A worker has taken a recording."""
         with self._lock:
             self._planned[rel_path] = duration_sec
             self._ensure_lanes(lane)
-            self._lanes[lane] = (index, rel_path, duration_sec, time.time())
+            self._lanes[lane] = (index, rel_path, duration_sec, size_bytes, time.time(), "")
 
     def on_idle(self, lane: int) -> None:
         """A worker has run out of work — the tail of the run."""
         with self._lock:
             self._ensure_lanes(lane)
             self._lanes[lane] = None
+
+    def on_stage(self, lane: int, stage: str) -> None:
+        """A worker has moved on to another stage of the recording it holds."""
+        with self._lock:
+            self._ensure_lanes(lane)
+            entry = self._lanes[lane]
+            if entry is not None:
+                self._lanes[lane] = entry[:5] + (stage,)
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into the totals."""
@@ -1179,6 +1244,9 @@ class WorkerPanel:
             if result.status == "scanned" and result.duration_sec and result.elapsed_sec:
                 self._scan_audio += float(result.duration_sec)
                 self._scan_wall += float(result.elapsed_sec)
+                lane = int(result.lane)
+                self._lane_audio[lane] = self._lane_audio.get(lane, 0.0) + result.duration_sec
+                self._lane_wall[lane] = self._lane_wall.get(lane, 0.0) + result.elapsed_sec
             self._structures += result.count
 
             if result.status == "error":
@@ -1240,35 +1308,88 @@ class WorkerPanel:
         self._drawn = len(lines)
 
     def _cost_rate(self) -> float:
-        """Wall seconds one worker spends per second of audio, or ``0.0`` before it is known."""
+        """Wall seconds one worker spends per second of audio, or ``0.0`` before it is known.
+
+        This run's own measurement once anything has finished, and the last run's before that —
+        which is the difference between a panel that draws bars from the first second and one
+        that shows nothing until the first hour-long recording lands.
+        """
         if self._scan_audio <= 0 or self._scan_wall <= 0:
-            return 0.0
+            return self._prior
         return self._scan_wall / self._scan_audio
+
+    def _lane_factor(self, lane: int) -> float:
+        """This worker's own realtime factor: audio seconds it has scanned per wall second.
+
+        Its own, not the run's divided by the pool: workers are handed different recordings, and
+        one lane running at half the speed of its neighbours is the thing a panel with sixteen
+        rows exists to show. Zero — printed as ``—`` — until that lane has finished a recording,
+        because a worker's speed is only knowable from a worker's completed work.
+        """
+        audio, wall = self._lane_audio.get(lane, 0.0), self._lane_wall.get(lane, 0.0)
+        return realtime_factor(audio, wall)
+
+    def _lane_fraction(self, entry: tuple | None, now: float) -> float:
+        """How far through its recording one lane is, ``0.0`` when there is no way to tell."""
+        if entry is None:
+            return 0.0
+        seconds, started_at = entry[2], entry[4]
+        estimate = seconds * self._cost_rate()
+        if estimate <= 0:
+            return 0.0
+        return min(BAR_CAP / 100.0, (now - started_at) / estimate)
+
+    def _audio_in_flight(self, now: float) -> float:
+        """Audio inside the workers right now, counted by how far through it each of them is.
+
+        Without this the overall bar reads 2% while every lane reads 40%: it counts recordings
+        only when they land, and a pool of sixteen workers each half-way through an hour-long
+        file is holding eight hours of audio that the bar knows nothing about.
+        """
+        return sum(
+            self._lane_fraction(entry, now) * entry[2]
+            for entry in self._lanes if entry is not None
+        )
 
     def _render(self, now: float) -> list[str]:
         """The whole panel: a header of run totals, then one row per worker."""
         width = terminal_width()
+        in_flight = self._audio_in_flight(now)
         block = progress_block(
             started=self._started,
             files_total=self._files_total,
             files_done=self._files_done,
             files_worked=self._files_worked,
             audio_total_sec=self._audio_total,
-            audio_done_sec=self._audio_done,
-            audio_worked_sec=self._audio_worked,
+            audio_done_sec=self._audio_done + in_flight,
+            # In the estimate too, or the header draws a bar and still says "estimating" beside
+            # it for the whole first round: the ETA is audio worked per wall second, and until a
+            # file lands every second of work done is in flight.
+            audio_worked_sec=self._audio_worked + in_flight,
             now=now,
         )
         elapsed = max(0.0, now - self._started)
-        factor = self._audio_worked / elapsed if elapsed > 0 else 0.0
+        # Audio in the workers counts towards the speed as well as towards the bar, marked with a
+        # ``~``: sixteen workers an hour into their first files have done sixteen hours of work,
+        # and "—" until the first one lands is not more honest, only less useful.
+        factor = realtime_factor(self._audio_worked + in_flight, elapsed)
+        about = "~" if in_flight > 0 else ""
+        # A part-done recording may fill the bar but not finish it: "100%" while a worker is
+        # still going is the one thing an estimate must never say.
+        fraction = float(block["fraction"])
+        if in_flight > 0:
+            fraction = min(fraction, BAR_CAP / 100.0)
         eta = block["eta_sec"]
         # Two lines rather than one: everything below is one row per core, and on a sixteen-core
         # run the header is the only thing competing for width with the file names.
         lines = [
-            clip(f"{bar(block['fraction'])} {block['fraction'] * 100:3.0f}%  "
+            clip(f"{bar(fraction)} {fraction * 100:3.0f}%  "
                   f"{self._files_done}/{self._files_total} files  "
-                  f"{duration(self._audio_done)} of {duration(self._audio_total)} audio", width),
+                  f"{about}{duration(self._audio_done + in_flight)} of "
+                  f"{duration(self._audio_total)} audio  "
+                  f"{about if factor > 0 else ''}{factor_text(factor)} realtime", width),
             clip(f"{self._workers} worker{'' if self._workers == 1 else 's'}  ·  "
-                  f"{factor:.1f}x realtime  ·  {clock(elapsed)} elapsed  ·  "
+                  f"{clock(elapsed)} elapsed  ·  "
                   f"{'estimating' if eta is None else clock(eta) + ' left'}  ·  "
                   f"{self._structures} structure{'' if self._structures == 1 else 's'}", width),
         ]
@@ -1277,24 +1398,26 @@ class WorkerPanel:
         return lines
 
     def _lane_line(self, lane: int, entry: tuple | None, now: float, width: int) -> str:
-        """One worker's row."""
+        """One worker's row: how far in, which stage, which recording, how big."""
         label = f" {lane + 1:>2}  "
         if entry is None:
             return f"{label}{'·' * _LANE_BAR}    —      idle"
-        _index, rel_path, seconds, started_at = entry
+        _index, rel_path, seconds, size_bytes, started_at, stage = entry
         elapsed = now - started_at
-        rate = self._cost_rate()
-        estimate = seconds * rate
-        if estimate > 0:
-            pct = min(BAR_CAP, 100.0 * elapsed / estimate)
-            filled = int(round(_LANE_BAR * pct / 100.0))
+        fraction = self._lane_fraction(entry, now)
+        if fraction > 0:
+            pct = 100.0 * fraction
+            filled = int(round(_LANE_BAR * fraction))
             drawn = "█" * filled + "░" * (_LANE_BAR - filled)
             stat = f"{drawn} {pct:3.0f}%  {elapsed:4.0f}s"
         else:
-            # First round of the run: no throughput learned yet, so elapsed alone. Same rule as
-            # the serial line — an estimate drawn before anything has finished is invention.
+            # Nothing has finished and there is no prior for this algorithm, so there is no
+            # throughput to predict with. Elapsed alone: a bar drawn from nothing is invention.
             stat = f"{'░' * _LANE_BAR}   —   {elapsed:4.0f}s"
-        return f"{label}{stat}  {fit_path(rel_path, width - len(label + stat) - 3)}"
+        stat = f"{stat}  {factor_text(self._lane_factor(lane)):>7}"
+        stat = f"{stat}  {stage_tag(stage)}"
+        tail = named_recording(rel_path, size_bytes, seconds, width - len(label + stat) - 3)
+        return f"{label}{stat}  {tail}"
 
 
 
@@ -1316,19 +1439,14 @@ def _metric_rows(manifest: dict) -> list[list[str]]:
     by_status = manifest["by_status"]
     elapsed = float(manifest["elapsed_sec"])
     workers = int(manifest.get("workers", 1))
-    # Audio actually scanned, not the corpus total: a resumed run must not take credit for hours
-    # it skipped, and this is the same rule the performance JSON's realtime_factor follows.
-    audio_sec = sum(
-        float(row.get("duration_sec") or 0.0)
-        for row in manifest["manifest"]
-        if row.get("status") == "scanned"
-    )
+    audio_sec = _audio_scanned(manifest)
 
     rows = [["recordings", f"{manifest['files']:,}", ""]]
     for status, label in (
         ("scanned", "scanned"),
         ("skipped", "skipped (resume)"),
         ("too_short", "too short"),
+        ("too_large", "too large (--max-size)"),
         ("error", "errors"),
     ):
         if by_status.get(status):
@@ -1421,6 +1539,149 @@ def _print_summary(manifest: dict, out_root: str) -> None:
     print()
     print(f"Output folder: {out_root}")
     print("Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.")
+
+
+# -- serving ---------------------------------------------------------------------------------
+
+
+def _serve_root(folder: str | None) -> tuple[str, str]:
+    """Which output folder to serve, and where that choice came from.
+
+    Args:
+        folder: What the user typed, or ``None``.
+
+    Returns:
+        ``(absolute path, "argument" | "history")``.
+
+    Raises:
+        ScannerError: If nothing was given and no recent run is still on disk.
+    """
+    if folder:
+        return os.path.abspath(os.path.expanduser(folder)), "argument"
+    for row in run_history():
+        out = str(row.get("out") or "")
+        if out and os.path.isfile(os.path.join(os.path.expanduser(out), RUN_MANIFEST_NAME)):
+            return os.path.abspath(os.path.expanduser(out)), "history"
+    raise ScannerError(
+        "no folder given, and no recent run of this machine is still on disk.\n"
+        "  Name a folder, or see `siar-app runs` for what has been scanned here."
+    )
+
+
+def cmd_serve(args: Namespace) -> int:
+    """Serve one output folder read-only, for a browser at the other end of an ssh tunnel.
+
+    The whole command is three prints and a loop. What earns its place is the tunnel recipe: the
+    reason this exists is that the folder is on a fast headless box and the person who wants to look
+    at it is not, and the difference between a useful tool and a puzzle is whether the exact
+    ``ssh -L`` line is on screen to copy.
+    """
+    # Imported here rather than at the top: `siarapp.serve` pulls in `http.server`, and every
+    # `siar-app version` on every machine should not pay 6 ms for a command it is not running.
+    from siarapp.serve.folder import FolderError, ServedFolder
+    from siarapp.serve.http import ServeOptions, local_host_hint, page_url, serve_folder
+
+    try:
+        root, chosen_from = _serve_root(args.folder)
+        folder = ServedFolder(root)
+    except (FolderError, ScannerError) as e:
+        return _err(str(e))
+
+    # A page that is not in the wheel makes the whole command pointless, so it is worth finding out
+    # now rather than when the browser shows a blank tab.
+    try:
+        docs.local_web_path("viewer.html")
+    except docs.DocsError as e:
+        return _err(str(e))
+
+    if not args.allow_remote and args.bind not in ("127.0.0.1", "::1", "localhost"):
+        return _err(
+            f"--bind {args.bind} would let other machines reach this folder over plain HTTP.\n"
+            "  The supported way is an ssh tunnel to the default loopback bind:\n"
+            "      ssh -L 8420:localhost:8420 <user>@<this-host>\n"
+            "  If you really want it on the network, add --allow-remote."
+        )
+
+    options = ServeOptions(
+        port=args.port,
+        bind=args.bind,
+        token=args.token or legacy_env("SERVE_TOKEN") or "",
+        audio=not args.no_audio,
+        allow_origins=tuple(args.allow_origin or ()),
+        log_requests=args.verbose,
+    )
+
+    def announce(server, opts: ServeOptions) -> None:
+        _print_serving(folder, server, opts, chosen_from)
+        if args.open:
+            docs.open_path(page_url(server, opts.token))
+
+    try:
+        return serve_folder(folder, options, announce=announce)
+    except KeyboardInterrupt:
+        # A deliberate Ctrl-C on a server is how it is meant to end, so this is a 0 — and it is
+        # caught here so main()'s "re-run with --resume" never fires for a command with no run.
+        print(f"\nStopped serving {folder.root}. Nothing in it was changed.")
+        return 0
+    except OSError as e:
+        if e.errno in (errno.EADDRINUSE, errno.EACCES):
+            return _err(f"could not listen on {args.bind}:{args.port} ({e.strerror}) — "
+                        f"try --port {args.port + 1}")
+        return _err(f"could not start serving: {e}")
+
+
+def _print_serving(folder: ServedFolder, server, options: ServeOptions,
+                   chosen_from: str) -> None:
+    """The opening block: what is being served, at what URL, and how to reach it from a laptop."""
+    from siarapp.serve.http import local_host_hint, page_url
+
+    meta = folder.meta()
+    totals = meta.get("totals") or {}
+    by_status = totals.get("by_status") or {}
+    progress = meta.get("progress") or {}
+
+    rows = [["folder", folder.root + ("  (most recent run)" if chosen_from == "history" else "")]]
+    if meta.get("state") == "no-manifest":
+        rows.append(["state", "no run manifest yet — waiting for the scan's first flush"])
+    else:
+        detail = ", ".join(f"{n:,} {name.replace('_', ' ')}"
+                           for name, n in sorted(by_status.items()))
+        rows.append(["recordings", f"{totals.get('files', 0):,}" + (f"  ({detail})" if detail else "")])
+        rows.append(["audio", duration(float(totals.get("audio_sec") or 0.0))])
+        rows.append(["structures", f"{totals.get('structures', 0):,}"])
+        if meta.get("state") == "running":
+            fraction = float(progress.get("fraction") or 0.0)
+            eta = progress.get("eta_sec")
+            left = "estimating" if eta is None else f"{clock(float(eta))} left"
+            rows.append(["state", f"running — {fraction * 100:.0f}%, {left}"])
+        else:
+            rows.append(["state", "complete"])
+    url = page_url(server, options.token)
+    rows.append(["url", url])
+    if not options.audio:
+        rows.append(["audio route", "disabled (--no-audio)"])
+    if options.allow_origins:
+        rows.append(["allowed origins", ", ".join(options.allow_origins)])
+
+    print()
+    print(render_table(["FIELD", "VALUE"], rows, align=["<", "<"], flex=1))
+    print()
+
+    port = server.server_address[1]
+    if options.loopback:
+        print("On your laptop, run:")
+        print(f"    ssh -N -L {port}:localhost:{port} {getpass.getuser()}@{local_host_hint()}")
+        print("then open:")
+        print(f"    http://localhost:{port}/?t={options.token}")
+    else:
+        print(f"Reachable on {options.bind}:{port} — over plain HTTP, so anything on the path can "
+              f"read the token.")
+    print()
+    print("Read-only: nothing this serves can change the folder. Ctrl-C to stop.")
+    # Flushed, and this matters more than it looks: stdout is block-buffered when it is not a
+    # terminal, so a daemon started with `> serve.log &` would print the URL its reader needs only
+    # once it had stopped.
+    print(flush=True)
 
 
 # -- history / probing -----------------------------------------------------------------------

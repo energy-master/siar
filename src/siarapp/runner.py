@@ -44,6 +44,7 @@ from siarapp.viz.thumbnail import thumbnail_png
 
 __all__ = [
     "DEFAULT_FFT",
+    "DEFAULT_MAX_BYTES",
     "FileResult",
     "RunOptions",
     "plan_grid",
@@ -55,6 +56,16 @@ __all__ = [
 #: Grid used when neither the algorithm nor the user has an opinion. The web app's own default,
 #: which is what a box's coordinates were tuned against.
 DEFAULT_FFT = 1024
+
+#: Recordings above this many bytes are left out of the run unless ``--max-size`` says otherwise.
+#:
+#: The cost of a recording is not its file size, it is the magnitude grid the transform builds
+#: from it — at fft 1024 / hop 256, roughly eight times the sample data, and every worker may be
+#: handed the biggest file in the corpus. 550 MB of WAV is about an hour at 96 kHz stereo and
+#: costs a worker something like 4 GB; the file above it in the folder, at three hours, costs 12
+#: and takes the machine down with it. A default ceiling turns "the survey drive had one
+#: day-long file in it" from a dead run into one skipped row in the manifest.
+DEFAULT_MAX_BYTES = 550 * 1024 * 1024
 
 #: Hop as a fraction of the FFT size when unspecified — 75% overlap, the app's default.
 _DEFAULT_HOP_FRACTION = 4
@@ -100,10 +111,12 @@ class RunOptions:
         workers: Recordings to scan at once. ``1`` runs everything in this process, which is the
             default and the only behaviour that existed before ``--parallel``; ``0`` means as
             many as the machine can use (see :func:`siarapp.parallel.resolve_workers`).
+        max_bytes: Largest recording to ingest, in bytes (see :data:`DEFAULT_MAX_BYTES`).
+            ``0`` scans whatever is there, however big.
     """
 
     __slots__ = ("fft", "hop", "window", "channel", "params", "link", "resume",
-                 "thumbnails", "limit", "recursive", "workers")
+                 "thumbnails", "limit", "recursive", "workers", "max_bytes")
 
     def __init__(
         self,
@@ -119,6 +132,7 @@ class RunOptions:
         limit: int | None = None,
         recursive: bool = True,
         workers: int = 1,
+        max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> None:
         self.fft = fft
         self.hop = hop
@@ -131,6 +145,7 @@ class RunOptions:
         self.limit = limit
         self.recursive = recursive
         self.workers = int(workers)
+        self.max_bytes = max(0, int(max_bytes))
 
 
 class FileResult:
@@ -138,7 +153,8 @@ class FileResult:
 
     Attributes:
         rel_path: Path relative to the scanned folder.
-        status: ``"scanned"``, ``"skipped"`` (resume), ``"too_short"``, or ``"error"``.
+        status: ``"scanned"``, ``"skipped"`` (resume), ``"too_short"``, ``"too_large"``
+            (``--max-size``), or ``"error"``.
         count: Structures found.
         duration_sec: Recording length.
         elapsed_sec: Wall time spent on it.
@@ -219,6 +235,7 @@ def scan_one(
     recording: Recording,
     plan: dict,
     phases: dict | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> tuple[list[dict], FrameGrid]:
     """Transform one decoded recording and scan it.
 
@@ -229,11 +246,16 @@ def scan_one(
         phases: Optional dict to record timings into, as ``fft`` and ``scan`` seconds. Written
             into rather than returned so the two callers that want a breakdown can have one
             without changing what this returns for the ones that do not.
+        on_stage: Called with each stage's name as it begins. The same names :data:`PHASES`
+            uses, so what a display says is happening and what the closing table charges it to
+            are the same thing.
 
     Returns:
         ``(regions, grid)``. An empty region list and a zero-frame grid when the recording is
         shorter than one analysis window.
     """
+    if on_stage is not None:
+        on_stage("fft")
     at = time.time()
     result = stft(
         recording.samples,
@@ -254,6 +276,8 @@ def scan_one(
         phases["fft"] = time.time() - at
     if grid.frames == 0:
         return [], grid
+    if on_stage is not None:
+        on_stage("scan")
     at = time.time()
     regions = run_scan(algorithm, grid)
     if phases is not None:
@@ -268,9 +292,10 @@ def run_folder(
     options: RunOptions | None = None,
     *,
     progress: Callable[[int, int, FileResult], None] | None = None,
-    on_start: Callable[[int, int, str, float, int], None] | None = None,
+    on_start: Callable[[int, int, str, float, int, int], None] | None = None,
     on_corpus: Callable[[int, float, int], None] | None = None,
     on_idle: Callable[[int], None] | None = None,
+    on_stage: Callable[[int, str], None] | None = None,
     warn: Callable[[str], None] | None = None,
 ) -> dict:
     """Scan every recording under ``source_root`` and build the output folder.
@@ -281,22 +306,31 @@ def run_folder(
         out_root: Where to write the output folder.
         options: See :class:`RunOptions`.
         progress: Called ``(done, total, result)`` after each recording.
-        on_start: Called ``(index, total, rel_path, duration_sec, lane)`` *before* each recording
-            is decoded. The pair exists because one recording is not a quick step: nearly all of
-            its time is spent inside the algorithm's ``scan``, which is a single opaque call,
-            so a caller told only about completions has nothing to say for the whole of it.
-            ``duration_sec`` comes from the header probe already done above, and is ``0.0``
-            for a file whose header would not read. ``lane`` is the worker slot it went to,
+        on_start: Called ``(index, total, rel_path, duration_sec, lane, size_bytes)`` *before*
+            each recording is decoded. The pair exists because one recording is not a quick step:
+            nearly all of its time is spent inside the algorithm's ``scan``, which is a single
+            opaque call, so a caller told only about completions has nothing to say for the whole
+            of it. ``duration_sec`` comes from the header probe already done above, and is ``0.0``
+            for a file whose header would not read; ``size_bytes`` is what it occupies on disk,
+            and ``0`` when it could not be stat'ed. ``lane`` is the worker slot it went to,
             always ``0`` on a serial run.
         on_corpus: Called once, ``(files, audio_sec, workers)``, after the headers have been read
             and the pool sized — everything a display needs to draw a total before the first
             recording is opened.
         on_idle: Called ``(lane)`` when a worker slot runs out of work, at the tail of a parallel
             run.
+        on_stage: Called ``(lane, stage)`` as each stage of a recording begins — the
+            :data:`~siarapp.io.performance.PHASES` names. Between ``on_start`` and the result
+            this is the only thing that moves, and on a long recording it is the difference
+            between a display that says "still going" and one that says which part is slow.
         warn: Called with one-line warnings (mixed sample rates, oversized grids).
 
     Returns:
         The run manifest, as written to ``siar-app-run.json``.
+
+    Recordings above ``options.max_bytes`` never reach the loop: they are a ``too_large`` row in
+    the manifest and are gone before the headers are read, so neither the worker pool nor the
+    progress estimate is sized against a file that will not be scanned.
 
     Raises:
         FileNotFoundError: If ``source_root`` holds no recordings at all — almost always a typo
@@ -316,6 +350,10 @@ def run_folder(
         )
     if options.limit:
         files = files[: options.limit]
+    # One stat per file, and every later question about size is answered from it: what the
+    # ceiling excludes, and what the live display puts beside each recording's name.
+    sizes = [_file_size(p) for p in files]
+    files, sizes, oversized = _split_oversized(files, sizes, options.max_bytes, warn)
 
     plan = plan_grid(algorithm, options)
     if options.params:
@@ -337,18 +375,29 @@ def run_folder(
 
     out = OutputFolder(out_root, source_root, link=options.link)
     started = time.time()
-    results: list[FileResult] = []
+    # The oversized files are outcomes already, so they go in as rows before anything is scanned:
+    # a manifest that simply omitted them would say the folder held fewer recordings than it does,
+    # which is the one thing a skipped file must never do.
+    results: list[FileResult] = [
+        FileResult(out.rel_path(path), "too_large",
+                   error=f"{size:,} bytes is over the --max-size ceiling of "
+                         f"{options.max_bytes:,}")
+        for path, size in oversized
+    ]
     audio_done = audio_worked = 0.0
     worked = 0
     next_flush_at = 0.0
+    # Everything the loop below counts is offset by the rows already standing.
+    total = len(files) + len(oversized)
 
     if workers > 1:
         stream = scan_parallel(
             AlgorithmSpec.of(handle, options.params), files, out, plan, options, durations,
-            workers, on_start=on_start, on_idle=on_idle,
+            sizes, workers, on_start=on_start, on_idle=on_idle, on_stage=on_stage,
         )
     else:
-        stream = _scan_serially(handle, files, out, plan, options, durations, on_start)
+        stream = _scan_serially(handle, files, out, plan, options, durations, sizes, on_start,
+                                on_stage)
 
     for i, (index, result) in enumerate(stream, start=1):
         results.append(result)
@@ -367,8 +416,8 @@ def run_folder(
                 out, handle, source_root, plan, options, results, started, workers,
                 progress_block(
                     started=started,
-                    files_total=len(files),
-                    files_done=i,
+                    files_total=total,
+                    files_done=i + len(oversized),
                     files_worked=worked,
                     audio_total_sec=audio_total,
                     audio_done_sec=audio_done,
@@ -387,7 +436,7 @@ def run_folder(
         out, handle, source_root, plan, options, results, started, workers,
         progress_block(
             started=started,
-            files_total=len(files),
+            files_total=total,
             files_done=len(results),
             files_worked=worked,
             audio_total_sec=audio_total,
@@ -406,7 +455,9 @@ def _scan_serially(
     plan: dict,
     options: RunOptions,
     durations: list[float],
-    on_start: Callable[[int, int, str, float, int], None] | None,
+    sizes: list[int],
+    on_start: Callable[[int, int, str, float, int, int], None] | None,
+    on_stage: Callable[[int, str], None] | None = None,
 ) -> Iterator[tuple]:
     """Scan every file in this process, yielding ``(index, FileResult)`` in folder order.
 
@@ -415,10 +466,12 @@ def _scan_serially(
     above sees the same stream of finished recordings and writes the same two documents.
     """
     total = len(files)
+    # Lane 0, always: a serial run is one worker, and the display it feeds has one row.
+    stage = None if on_stage is None else (lambda name: on_stage(0, name))
     for index, path in enumerate(files):
         if on_start is not None:
-            on_start(index + 1, total, out.rel_path(path), durations[index], 0)
-        yield index, scan_file(handle, path, out, plan, options)
+            on_start(index + 1, total, out.rel_path(path), durations[index], 0, sizes[index])
+        yield index, scan_file(handle, path, out, plan, options, stage)
 
 
 def _write_state(
@@ -466,12 +519,27 @@ def scan_file(
     out: OutputFolder,
     plan: dict,
     options: RunOptions,
+    on_stage: Callable[[str], None] | None = None,
 ) -> FileResult:
     """Decode, scan and write one recording. Never raises for a per-file problem.
 
     Public because a worker process calls it directly (:mod:`siarapp.parallel`), and it is the
     whole of what a worker does: everything it touches is either read-only or this recording's
     own output paths, which is what makes running several at once safe.
+
+    Args:
+        handle: A :class:`siarapp.loader.AlgorithmHandle`.
+        path: The recording.
+        out: The output folder to write into.
+        plan: The grid from :func:`plan_grid`.
+        options: The run options.
+        on_stage: Called with each :data:`PHASES` name as that stage begins, for a display that
+            would otherwise have nothing to say for the several minutes one recording can spend
+            inside ``scan``. A recording that is skipped or fails reports the stages it reached
+            and no more.
+
+    Returns:
+        The :class:`FileResult` for this recording, whatever happened to it.
     """
     rel = out.rel_path(path)
     if options.resume and out.already_done(path):
@@ -481,6 +549,8 @@ def scan_file(
     # Filled stage by stage, so whatever this file reached before it failed is still reported. The
     # phases are the only view into where a slow run's time actually goes; see :data:`PHASES`.
     phases: dict[str, float] = {}
+    if on_stage is not None:
+        on_stage("decode")
     try:
         recording = load_mono(path, channel=options.channel)
     except OSError as e:
@@ -489,13 +559,15 @@ def scan_file(
     phases["decode"] = time.time() - started
 
     try:
-        regions, grid = scan_one(handle.algorithm, recording, plan, phases)
+        regions, grid = scan_one(handle.algorithm, recording, plan, phases, on_stage)
     except ScannerError as e:
         return FileResult(rel, "error", duration_sec=recording.duration_sec,
                           elapsed_sec=time.time() - started, error=str(e), phases=phases)
 
     status = "scanned" if grid.frames else "too_short"
 
+    if on_stage is not None:
+        on_stage("write")
     at = time.time()
     try:
         out.place_audio(path)
@@ -517,6 +589,8 @@ def scan_file(
         ))
         phases["write"] = time.time() - at
         if options.thumbnails:
+            if on_stage is not None:
+                on_stage("thumbnail")
             at = time.time()
             out.write_thumbnail(path, thumbnail_png(recording.samples))
             phases["thumbnail"] = time.time() - at
@@ -545,6 +619,65 @@ def _shape_counts(regions: list[dict]) -> dict:
         shape = str(r.get("shape") or "structure")
         counts[shape] = counts.get(shape, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _file_size(path: str) -> int:
+    """What a recording occupies on disk, or ``0`` when it cannot be stat'ed."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _split_oversized(
+    files: list[str],
+    sizes: list[int],
+    max_bytes: int,
+    warn: Callable[[str], None],
+) -> tuple[list[str], list[int], list[tuple[str, int]]]:
+    """Divide the corpus into what will be scanned and what is too big to ingest.
+
+    On file size, not on duration or frame count, and before the headers are read: the point is
+    to be cheap and to be certain. ``os.stat`` costs nothing next to a decode, needs no codec to
+    agree, and is the one number available for a file whose header is unreadable — which a
+    truncated 40 GB WAV very often is.
+
+    Args:
+        files: Candidate recordings, in folder order.
+        sizes: Their sizes, from :func:`_file_size`, one per file.
+        max_bytes: The ceiling. ``0`` disables the test and returns everything.
+        warn: Called once with a summary when anything was left out. Once, not once per file: a
+            survey drive holding two thousand oversized files should cost two thousand rows in
+            the manifest and one line on the terminal.
+
+    Returns:
+        ``(kept, kept_sizes, oversized)``, where ``oversized`` pairs each excluded path with its
+        size. A file whose size would not read is kept: it goes on to be an error row with a real
+        message rather than being called too big on the strength of a stat that never worked.
+    """
+    if max_bytes <= 0:
+        return files, sizes, []
+
+    kept: list[str] = []
+    kept_sizes: list[int] = []
+    oversized: list[tuple[str, int]] = []
+    for path, size in zip(files, sizes):
+        if size > max_bytes:
+            oversized.append((path, size))
+        else:
+            kept.append(path)
+            kept_sizes.append(size)
+
+    if oversized:
+        biggest = max(size for _p, size in oversized)
+        warn(
+            f"{len(oversized)} recording(s) are over the --max-size ceiling of "
+            f"{max_bytes / 1024**2:.0f} MB (largest {biggest / 1024**2:.0f} MB) and will not be "
+            "scanned. They are in the manifest as `too_large`. Raise --max-size to take them, "
+            "or --max-size 0 for no ceiling — a single recording costs a worker several times "
+            "its own size once it is a magnitude grid."
+        )
+    return kept, kept_sizes, oversized
 
 
 def _probe_corpus(files: list[str], plan: dict, warn: Callable[[str], None]) -> list:

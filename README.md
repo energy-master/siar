@@ -59,7 +59,7 @@ The first command you run shows the MIT licence and asks you to accept it. See
 [Licence](#licence). Run the commands below to get started.
 
 ```bash
-siar-app quick-start      # the illustrated walkthrough, fifteen steps
+siar-app quick-start      # the illustrated walkthrough, sixteen steps
 siar-app readme           # this manual
 ```
 
@@ -220,6 +220,18 @@ Output folder: /home/you/survey-scan
 Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.
 ```
 
+While a recording is being worked on, that line is live and says what is happening to it:
+
+```
+[287/412] station-c/2025-09-08T1400.wav  1.9 GiB · 30.0 min  [scan]  ████████░░░░░ 61%  38s of ~62s
+```
+
+The size and the length come from the file itself, and the tag in the middle is the stage it is
+in right now — one of the same five the table below charges the time to. Nearly all of a
+recording's time is spent inside `scan`, which is a single call into a closed algorithm with no
+way to report progress from within, so the stage is what distinguishes a run that is working from
+one that is stuck on a slow disk.
+
 `realtime` is the row to plan with: 53.6x means the scan ran 53.6 times faster than the audio it
 scanned, so an hour of recording cost about a minute. It counts only audio this run actually
 scanned, so a `--resume` run is rated on the work it did rather than on the files it skipped, and
@@ -252,6 +264,7 @@ Useful flags:
 | `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. Holds the finished run on screen until Ctrl-Q. |
 | `--resume` | Carry on where an interrupted run stopped. Safe to pass always. |
 | `--limit 20` | Trial the algorithm on twenty files before committing to a corpus. |
+| `--max-size 2GB` | Raise (or with `0`, remove) the ceiling on how big a recording may be. Default 550MB — see [Memory](#notes). |
 | `--link` | Hardlink the audio into the output folder instead of copying it. Same filesystem only; falls back to a copy. |
 | `--param minSigma=3.5` | Tune the algorithm. Repeatable. |
 | `--fmin 2000 --fmax 20000` | Restrict the band. |
@@ -280,17 +293,24 @@ The display becomes one row per worker, so a stalled lane is visible rather than
 ```
 [████████████░░░░░░░░░░░░]  48%  12043/25318 files  201.4 h of 418.2 h audio
 12 workers  ·  38.1x realtime  ·  5:24:11 elapsed  ·  5:41:03 left  ·  91043 structures
-  1  ████████░░░░░░  61%    38s  station-a/2026-07-03/0410.wav
-  2  ██░░░░░░░░░░░░  17%    11s  station-a/2026-07-03/0420.wav
+  1  ████████░░░░░░  61%    38s  [scan]    station-a/2026-07-03/0410.wav  3.3 GiB · 40.0 min
+  2  ██░░░░░░░░░░░░  17%    11s  [decode]  station-a/2026-07-03/0420.wav  238.4 MiB · 10.0 min
   3  ··············    —      idle
 ```
+
+Each row says which stage the recording is in — `decode`, `fft`, `scan`, `write`, `thumbnail`,
+the same five the closing table charges the time to — and how big the file is, in bytes and in
+audio. Those three facts together are what make a slow lane readable rather than worrying: a row
+sitting at 40% for ten minutes means something quite different once it says `[scan]` on 3.3 GiB.
 
 Two things to know before turning it up:
 
 * **Memory, not cores, is usually the limit.** Each worker holds one recording's magnitude grid,
   so the pool costs the largest recording in the corpus times the number of workers. The count
   chosen by bare `--parallel` is capped to fit; an explicit `--parallel N` is obeyed with a
-  warning if it will not. Raising `--hop` shrinks every grid and buys workers.
+  warning if it will not. Raising `--hop` shrinks every grid and buys workers, and `--max-size`
+  keeps one outsized recording from sizing the whole pool: files above the ceiling are gone
+  before the pool is measured.
 * **The manifest lists recordings in the order they finished**, which on a parallel run is not
   folder order — a ten-second clip submitted after a forty-minute drift recording is written
   first. Nothing reads the manifest in order; the sidecars are what the app pairs to lanes.
@@ -315,8 +335,8 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 │ decode        0.85 h  ··········   2%   │ sweep         2,194  ··········         │
 │ write         0.16 h  ··········   0%   │ click_train   1,822  ··········         │
 ├─ workers ─────────────────────────────────────────────────────────────────────────┤
-│   1  ████████░░░░  61%    38s  station-a/2026-07-03/0410.wav                      │
-│   2  ██░░░░░░░░░░  17%    11s  station-a/2026-07-03/0420.wav                      │
+│   1  ████████░░░░  61%    38s  [scan]    …0410.wav       3.3 GiB · 40.0 min       │
+│   2  ██░░░░░░░░░░  17%    11s  [decode]  …0420.wav     238.4 MiB · 10.0 min       │
 │   3  ············   idle                                                          │
 ├─ problems ────────────────────────────────────────────────────────────────────────┤
 │ ! station-b/2026-06-28/1130.wav: could not decode: Format not recognised.         │
@@ -376,6 +396,86 @@ Hovering a row lights its box and vice versa, and clicking a box promotes it to 
 Save it as a **work project** and the whole thing — folder, boxes and any labels you have made —
 comes back in one click next time.
 
+## 6. Look at a scan that is on another machine: `siar-app serve`
+
+A survey is often scanned where the cores are — a headless box that gets through in four hours what
+a laptop would take two days over. That leaves the output folder in the wrong place, and it is the
+one thing you cannot conveniently move: it holds a copy of every recording, so a real corpus is
+hundreds of gigabytes and copying it costs more time than the fast machine saved.
+
+What you actually want to look at is tiny. So serve the folder where it is:
+
+```bash
+# on the machine that did the scanning
+$ siar-app serve ~/survey-scan
+
+FIELD       VALUE
+----------  ------------------------------------------------------
+folder      /home/you/survey-scan
+recordings  12,481  (12,469 scanned, 12 errors)
+audio       27.40 h
+structures  3,117,204
+state       complete
+url         http://127.0.0.1:8420/?t=jLhljXDeneOuLwuEqn5w__x7…
+
+On your laptop, run:
+    ssh -N -L 8420:localhost:8420 you@survey-box
+then open:
+    http://localhost:8420/?t=jLhljXDeneOuLwuEqn5w__x7…
+
+Read-only: nothing this serves can change the folder. Ctrl-C to stop.
+```
+
+Copy the `ssh` line, run it on your laptop, open the URL. You get a page showing every recording as
+a lane with its thumbnail, its outcome and its structure count; click one and its boxes are drawn
+over a spectrogram, with the run's performance table and the other runs on that box a click away.
+
+**It sends a picture, not the audio.** Opening a lane fetches a reduced spectrogram computed on the
+remote machine — dB-normalised, quantised to a byte per cell, decimated to the width being drawn —
+which is about 350 KB whatever the recording's length. The alternative is worse than it sounds: a
+full analysis grid is *four times* the size of the audio it came from (a 40-minute 96 kHz recording
+is 440 MB of WAV and 1.76 GB of magnitudes), and even the WAV is a bad trade for a picture you are
+going to look at once. The recordings themselves are fetched only if you press play or download,
+and `--no-audio` refuses even that.
+
+It is also cheap on the remote box, because the picture is drawn from a few thousand seeks rather
+than a decode: the cost is the number of columns asked for, not the duration. Measured on 96 kHz
+noise, a 2000×256 preview takes about 85 ms whether the recording is one minute or ten, while
+decoding the same files takes 16 ms and 172 ms respectively — the crossover is at about five
+minutes and the gap widens from there.
+
+**Serve a run that is still going.** The daemon reads the run manifest, which `siar-app run`
+rewrites after every recording, so a scan started this morning can be watched from your laptop this
+afternoon: the bar fills, new lanes appear, and the page says how old the numbers are rather than
+implying they are live.
+
+Two things worth knowing:
+
+* **The index is the run's manifest, not a census of the folder.** A resumed run lists the files it
+  skipped, so the usual case is complete — but if the most recent run over that folder used
+  `--limit`, or two runs covered different subsets, the page shows what that manifest lists and says
+  so beside the totals.
+* **The token is not optional and the bind is loopback.** A fresh token is minted per invocation and
+  required on every request. `--bind` anything other than loopback needs `--allow-remote` as well,
+  because a bearer token over plain HTTP on a survey LAN is a different proposition from a tunnel.
+
+| Flag | Meaning |
+|---|---|
+| `--port N` | port to listen on (default 8420; `0` picks a free one) |
+| `--bind ADDR` | address to listen on (default `127.0.0.1`, the `ssh -L` end) |
+| `--allow-remote` | permit a non-loopback `--bind`, over plain HTTP |
+| `--token VALUE` | use this token instead of a fresh one. Persists in shell history — prefer the minted one |
+| `--open` | also open the page in a browser on the serving machine |
+| `--no-audio` | refuse to serve the recordings themselves; pictures still work |
+| `--allow-origin URL` | let a web origin read the daemon cross-origin. Repeatable, none by default |
+| `--verbose` | one line per request, with the token stripped |
+
+With no folder argument it serves the most recent run from `siar-app runs`.
+
+This page is deliberately a browsing tool, not the viewer: no 3D surface, no labelling, no model
+runs, and no way to write anything. When you want those, that is what dropping the folder into
+IDent Dynamics is for.
+
 ## Command reference
 
 Fourteen commands. Six of them (`version`, `quick-start`, `readme`, `installed`, `scan`, and
@@ -409,7 +509,7 @@ Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.4.0 · © Vixen Intelligence 2026
+siar-app 0.5.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
@@ -420,7 +520,7 @@ invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 
 ```bash
 $ siar-app version
-siar-app 0.4.0
+siar-app 0.5.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
@@ -443,7 +543,7 @@ See [Licence](#licence) below.
 
 ### `siar-app quick-start`
 
-Opens the illustrated quickstart in whatever browser this machine has — fifteen steps, from
+Opens the illustrated quickstart in whatever browser this machine has — sixteen steps, from
 installing `uv` through to rating an algorithm, each one a terminal window showing the real
 command and its real output.
 
@@ -651,6 +751,7 @@ else stays a string. An algorithm that wanted a float should not receive `"2.5"`
 | `--link` | hardlink the audio instead of copying it (same filesystem only) |
 | `--no-thumbnails` | skip the per-recording lane previews |
 | `--limit N` | stop after N recordings — a trial run over a big corpus |
+| `--max-size SIZE` | skip recordings larger than this (default `550MB`; `0` for no ceiling). Takes `KB`, `MB`, `GB` or a plain byte count |
 | `--parallel [N]` | scan N recordings at once, one process each; bare `--parallel` uses every core the machine's memory will hold |
 | `--no-recursive` | only the top level of the folder |
 | `--tui` | draw the whole run in one live panel, held at the end until Ctrl-Q — [see above](#watching-a-long-run---tui). Needs a terminal |
@@ -684,6 +785,32 @@ WHEN                  ALGORITHM       FILES  FOUND  OUTPUT
 |---|---|
 | `--limit N` | how many to show (default 20) |
 | `--json` | the raw history |
+
+### `siar-app serve [DIR]`
+
+Serve one output folder read-only over HTTP so it can be browsed from another machine through an
+ssh tunnel — see [the tutorial section](#6-look-at-a-scan-that-is-on-another-machine-siar-app-serve)
+for what the page shows and why it sends a picture rather than the audio. `DIR` defaults to the most
+recent run in `siar-app runs`.
+
+```bash
+$ siar-app serve ~/survey-scan --port 8420
+```
+
+Binds `127.0.0.1`, mints a token, and prints the `ssh -L` line to copy. Runs in the foreground until
+Ctrl-C, which exits 0 — leave it under `tmux` or `nohup` on a box you log out of. There is no route
+that writes: `GET`, `HEAD` and `OPTIONS` are the only methods answered.
+
+| Flag | Meaning |
+|---|---|
+| `--port N` | port to listen on (default 8420; `0` picks a free one) |
+| `--bind ADDR` | address to listen on (default `127.0.0.1`) |
+| `--allow-remote` | required for a non-loopback `--bind` |
+| `--token VALUE` | use this token instead of a fresh one |
+| `--open` | also open the page on the serving machine |
+| `--no-audio` | refuse to serve the recordings themselves |
+| `--allow-origin URL` | allow a web origin to read it cross-origin; repeatable |
+| `--verbose` | one line per request |
 
 ### `siar-app feedback NAME`
 
@@ -833,6 +960,21 @@ workers spent at once, and dividing it by `wall_sec` says how much of the pool w
 its largest single recording costs — times `--parallel`. A long recording at a fine grid is the
 case to watch: the CLI prints the grid size before starting and suggests raising the hop size,
 `--hop` ,when it is ltoo arge.
+
+Because that cost is set by the biggest file in the folder, a run refuses the outliers rather
+than dying on them. Anything over `--max-size` — **550MB** by default, roughly an hour at 96 kHz
+stereo — is left out of the run before the headers are read, listed in the manifest as
+`too_large`, and reported on the terminal as one line:
+
+```
+3 recording(s) are over the --max-size ceiling of 550 MB (largest 41293 MB) and will not be
+scanned. They are in the manifest as `too_large`.
+```
+
+The file size is not the memory it costs: the magnitude grid built from it is several times
+larger. Raise the ceiling (`--max-size 4GB`) or remove it (`--max-size 0`) when the machine can
+take it, and raise `--hop` alongside it if the grid is what is tight. Nothing is deleted or
+altered — a skipped recording is simply not in the output folder.
 
 **The algorithms are closed source.** They download as obfuscated bundles and this package never
 sees inside them. That is a deterrent paired with your licence terms, not a 

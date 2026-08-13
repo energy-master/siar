@@ -36,6 +36,7 @@ __all__ = [
     "platform_compatible",
     "python_supported",
     "read_json",
+    "recent_cost",
     "record_run",
     "run_history",
     "save_credentials",
@@ -296,3 +297,37 @@ def record_run(entry: dict) -> None:
         write_json(_runs_path(), rows[:RUN_HISTORY_MAX])
     except OSError:
         pass
+
+
+def recent_cost(algorithm: str) -> tuple[float, dict]:
+    """What this algorithm cost per second of audio, last time it ran here, and how it divided.
+
+    This is what a live display needs before it has learned anything of its own. Without it the
+    first round of a run draws no progress at all — every bar waits on the first completed
+    recording, and on a corpus of hour-long files that is an hour of a screen that says only
+    "still going". The same machine running the same algorithm again is a good enough guess to
+    draw with, and it is replaced by this run's own measurement the moment one file lands.
+
+    Matched on the algorithm alone. The recording lengths do not matter — the figure is per
+    second of audio — and the grid rarely does, because ``--fft`` is overridden on a small
+    minority of runs and a wrong guess costs a bar that corrects itself within one file.
+
+    Args:
+        algorithm: The slug being run.
+
+    Returns:
+        ``(wall seconds per second of audio, per-stage seconds)``. ``(0.0, {})`` when nothing
+        usable was recorded — a first run on this machine, or a history written before the
+        figures were kept. The stage split is what lets a bar know that a recording is nine
+        tenths ``scan``, which is the difference between a lane bar that means something and one
+        that is full before the scan starts.
+    """
+    for row in run_history():
+        if not isinstance(row, dict) or row.get("algorithm") != algorithm:
+            continue
+        audio = float(row.get("audio_sec") or 0.0)
+        worker = float(row.get("worker_sec") or 0.0)
+        if audio > 0 and worker > 0:
+            phases = row.get("phases")
+            return worker / audio, dict(phases) if isinstance(phases, dict) else {}
+    return 0.0, {}

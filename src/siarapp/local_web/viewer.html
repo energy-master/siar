@@ -1,0 +1,107 @@
+<!doctype html>
+<!--
+  The page `siar-app serve` serves: a read-only look at one output folder, over an ssh tunnel.
+
+  Deliberately small. It shows what a scan found, where the time went, and what one recording looks
+  like — the questions you have while a survey is still on the remote box. It is not the IDent
+  Dynamics viewer and does not try to be: no WebGL surface, no labelling, no model runs, no writes.
+  Drop the folder into the web app when you want those.
+
+  Everything is fetched from the daemon that served this file, so the port it is reached on through
+  the tunnel is never compiled in. No CDN, no build step, no framework.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>siar-app — scan folder</title>
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="brand">
+    <span class="mark">SIaR</span>
+    <span class="folder" id="folder">—</span>
+    <span class="chip" id="readonly" hidden>read-only</span>
+  </div>
+  <div class="run" id="run"></div>
+  <div class="progress" id="progress" hidden>
+    <div class="bar"><div class="fill" id="progress-fill"></div></div>
+    <div class="progress-foot">
+      <span id="progress-done"></span>
+      <span id="progress-left"></span>
+      <span class="dim" id="progress-age"></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="rail" aria-label="Recordings">
+    <div class="filters">
+      <input type="search" id="q" placeholder="filter by path" autocomplete="off"
+             spellcheck="false" aria-label="Filter by path">
+      <select id="status" aria-label="Filter by outcome"><option value="">any outcome</option></select>
+      <select id="shape" aria-label="Filter by shape"><option value="">any shape</option></select>
+      <select id="sort" aria-label="Sort by">
+        <option value="path">path</option>
+        <option value="structures">structures</option>
+        <option value="duration">duration</option>
+        <option value="elapsed">time to scan</option>
+        <option value="status">outcome</option>
+      </select>
+      <button type="button" id="order" title="Reverse the order" aria-label="Reverse the order">↓</button>
+    </div>
+    <div class="lanes" id="lanes" role="list"></div>
+    <div class="rail-foot">
+      <span id="counted"></span>
+      <button type="button" id="more" hidden>load more</button>
+    </div>
+  </section>
+
+  <section class="detail" aria-label="Selected recording">
+    <div class="empty" id="empty">
+      <h1>A scan on a machine that is not this one</h1>
+      <p id="empty-note">Pick a recording on the left.</p>
+    </div>
+
+    <article id="picked" hidden>
+      <h1 id="picked-path">—</h1>
+      <div class="picked-meta" id="picked-meta"></div>
+      <div class="figure">
+        <div class="axis-y" id="axis-y" aria-hidden="true"></div>
+        <div class="plot" id="plot">
+          <img id="preview" alt="" draggable="false">
+          <canvas id="boxes"></canvas>
+          <div class="plot-note" id="plot-note"></div>
+        </div>
+        <div class="axis-x" id="axis-x" aria-hidden="true"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="tip" id="tip" hidden></div>
+      <div class="audio" id="audio"></div>
+    </article>
+
+    <details class="panel" id="performance-panel">
+      <summary>What the run cost</summary>
+      <div id="performance">—</div>
+    </details>
+
+    <details class="panel" id="runs-panel">
+      <summary>Other runs on this machine</summary>
+      <div id="runs">—</div>
+    </details>
+  </section>
+</main>
+
+<div class="nokey" id="nokey" hidden>
+  <div>
+    <h1>This page needs the token</h1>
+    <p>Open the URL <code>siar-app serve</code> printed — it carries a <code>?t=</code> that this
+       page reads once and sends with every request.</p>
+  </div>
+</div>
+
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

@@ -24,7 +24,9 @@ import tempfile
 import webbrowser
 
 __all__ = [
+    "LOCAL_WEB_PAGES",
     "DocsError",
+    "local_web_path",
     "open_path",
     "quickstart_path",
     "readme_html",
@@ -41,6 +43,48 @@ class DocsError(RuntimeError):
 # -- finding what shipped --------------------------------------------------------------------
 
 
+#: Every page that ships inside the package, and the only names :func:`local_web_path` will look
+#: up. A frozenset rather than a directory listing: one caller is an HTTP handler serving files by
+#: name, and "whatever happens to be in that folder" is not a thing to hand a request.
+LOCAL_WEB_PAGES = frozenset({
+    "quickstart.html",
+    "quickstart.css",
+    "quickstart.js",
+    "page-text.js",
+    "viewer.html",
+    "viewer.css",
+    "viewer.js",
+})
+
+
+def local_web_path(name: str) -> str:
+    """Absolute path to one of the pages packaged under ``local_web/``.
+
+    Args:
+        name: The file's name, which must be one of :data:`LOCAL_WEB_PAGES`.
+
+    Returns:
+        The path inside the installed package.
+
+    Raises:
+        DocsError: If the name is not a page this package ships, or the file is missing — which
+            means the wheel was built without its package data, worth saying plainly rather than
+            opening a blank tab or serving a 404 nobody can act on.
+    """
+    if name not in LOCAL_WEB_PAGES:
+        raise DocsError(f"{name!r} is not a page this package ships")
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "local_web", name)
+    if not os.path.isfile(path):
+        raise DocsError(
+            f"{name} is not where it should be ({path}).\n"
+            "  This install is missing its package data — reinstall with:\n"
+            "      uv tool install --force --python 3.13 "
+            "git+https://github.com/energy-master/siar.git"
+        )
+    return path
+
+
 def quickstart_path() -> str:
     """Absolute path to the packaged quickstart page.
 
@@ -48,19 +92,9 @@ def quickstart_path() -> str:
         The path to ``local_web/quickstart.html`` inside the installed package.
 
     Raises:
-        DocsError: If the file is missing, which means the wheel was built without its
-            package data — worth saying plainly rather than opening a blank tab.
+        DocsError: If the file is missing — see :func:`local_web_path`.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "local_web", "quickstart.html")
-    if not os.path.isfile(path):
-        raise DocsError(
-            f"the quickstart page is not where it should be ({path}).\n"
-            "  This install is missing its package data — reinstall with:\n"
-            "      uv tool install --force --python 3.13 "
-            "git+https://github.com/energy-master/siar.git"
-        )
-    return path
+    return local_web_path("quickstart.html")
 
 
 def readme_markdown() -> str:

@@ -228,6 +228,84 @@ def test_limit_and_no_recursive_bound_the_work(corpus, stub, tmp_path):
     assert all("/" not in row["path"] for row in manifest["manifest"])
 
 
+def test_a_run_says_which_stage_each_recording_is_on(corpus, stub, tmp_path):
+    """The live line has to have something to say during the minutes one `scan` can take."""
+    seen: list[tuple] = []
+    starts: list[tuple] = []
+    run_folder(
+        stub, str(corpus), str(tmp_path / "out"), RunOptions(),
+        on_start=lambda i, total, rel, dur, lane, size: starts.append((rel, dur, size, lane)),
+        on_stage=lambda lane, stage: seen.append((lane, stage)),
+    )
+    stages = [stage for _lane, stage in seen]
+    # loud.wav in full, then quiet.wav, then tiny.wav — which is too short to reach `scan`.
+    assert stages[:5] == ["decode", "fft", "scan", "write", "thumbnail"]
+    assert stages[-4:] == ["decode", "fft", "write", "thumbnail"]
+    assert {lane for lane, _stage in seen} == {0}, "a serial run is one lane"
+
+    # And the display is handed the size and the length of every recording it announces.
+    assert [rel for rel, _dur, _size, _lane in starts] == [
+        "loud.wav", "station-b/quiet.wav", "tiny.wav",
+    ]
+    assert all(size > 0 for _rel, _dur, size, _lane in starts)
+    assert starts[0][1] == pytest.approx(1.0)
+
+
+def test_max_size_leaves_the_oversized_recording_out_of_the_run(corpus, stub, tmp_path):
+    """The whole point: one enormous file costs a manifest row, not the machine's memory."""
+    _write_wav(corpus / "big.wav", seconds=10.0)  # ~160 KB against ~16 KB each
+    out = tmp_path / "out"
+    warnings: list[str] = []
+    manifest = run_folder(stub, str(corpus), str(out), RunOptions(max_bytes=64 * 1024),
+                          warn=warnings.append)
+
+    rows = {row["path"]: row for row in manifest["manifest"]}
+    assert rows["big.wav"]["status"] == "too_large"
+    assert "--max-size" in rows["big.wav"]["error"]
+    # It is out of the run entirely, not scanned and then discarded.
+    assert not (out / "big.wav").exists()
+    assert not (out / "big.structures.json").exists()
+    # ...and the rest of the folder went through untouched.
+    assert manifest["files"] == 4
+    assert manifest["by_status"]["scanned"] == 2
+    assert any("--max-size" in w for w in warnings)
+
+
+def test_max_size_zero_takes_whatever_is_there(corpus, stub, tmp_path):
+    _write_wav(corpus / "big.wav", seconds=10.0)
+    manifest = run_folder(stub, str(corpus), str(tmp_path / "out"), RunOptions(max_bytes=0))
+    assert "too_large" not in manifest["by_status"]
+    assert manifest["by_status"]["scanned"] == 3
+
+
+def test_an_unreadable_file_is_not_reported_as_oversized(corpus, stub, tmp_path):
+    """A stat that fails says nothing about size, so the file goes on to be a real error row."""
+    (corpus / "truncated.wav").write_bytes(b"RIFF____WAVEfmt ")
+    manifest = run_folder(stub, str(corpus), str(tmp_path / "out"), RunOptions(max_bytes=64 * 1024))
+    rows = {row["path"]: row for row in manifest["manifest"]}
+    assert rows["truncated.wav"]["status"] == "error"
+
+
+def test_max_size_is_parsed_off_the_command_line(corpus):
+    from siarapp.cli.main import build_parser
+    from siarapp.runner import DEFAULT_MAX_BYTES
+
+    def parsed(*extra):
+        return build_parser().parse_args(
+            ["run", str(corpus), "--out", "/tmp/x", *extra]
+        ).max_size
+
+    assert parsed() == DEFAULT_MAX_BYTES == 550 * 1024**2
+    assert parsed("--max-size", "550MB") == 550 * 1024**2
+    assert parsed("--max-size", "1.5G") == int(1.5 * 1024**3)
+    assert parsed("--max-size", "4096") == 4096
+    assert parsed("--max-size", "0") == 0
+    with pytest.raises(SystemExit):
+        parsed("--max-size", "huge")
+    with pytest.raises(SystemExit):
+        parsed("--max-size", "12PB")
+
+
 def test_load_local_rejects_a_package_with_no_scan(tmp_path):
     from siarapp.grid import ScannerError
 

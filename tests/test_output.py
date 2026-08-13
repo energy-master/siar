@@ -18,7 +18,18 @@ import pytest
 from siarapp.grid import Region, ScannerError, normalise_regions
 from siarapp.io.output import SIDECAR_SUFFIX, OutputFolder, sidecar_document
 from siarapp.viz.png import encode_png
-from siarapp.viz.thumbnail import render_rgb, thumbnail_png
+from siarapp.viz.thumbnail import (
+    FFT_SIZE,
+    THUMB_BINS,
+    THUMB_FRAMES,
+    colourise,
+    hann_window,
+    normalise_db,
+    pool_bins,
+    render_rgb,
+    sparse_frame_starts,
+    thumbnail_png,
+)
 
 
 @pytest.fixture()
@@ -153,6 +164,51 @@ def test_thumbnail_is_the_apps_size_and_orientation():
 
 def test_thumbnail_is_none_below_one_window():
     assert thumbnail_png(np.zeros(100, dtype=np.float32)) is None
+
+
+def test_the_reduction_steps_compose_back_into_the_thumbnail():
+    """The four public steps are what `serve.preview` draws a bigger version of.
+
+    So they have to *be* the thumbnail, not merely resemble it: a preview that disagreed with the
+    lane strip above it would be a fourth implementation of a picture three are already supposed to
+    keep in step. Composing them by hand must give `render_rgb` back, pixel for pixel.
+    """
+    rate = 8000
+    t = np.arange(rate * 3) / rate
+    signal = (np.sin(2 * np.pi * 900 * t) * np.exp(-t)).astype(np.float32)
+
+    starts = sparse_frame_starts(signal.shape[0], FFT_SIZE, THUMB_FRAMES)
+    window = hann_window(FFT_SIZE)
+    block = signal[starts[:, None] + np.arange(FFT_SIZE)[None, :]].astype(np.float64) * window
+    grid = np.abs(np.fft.rfft(block, axis=1)).astype(np.float32)
+    by_hand = colourise(pool_bins(normalise_db(grid), THUMB_BINS))
+
+    assert np.array_equal(by_hand, render_rgb(signal))
+
+
+def test_pooling_reports_a_height_it_can_actually_reach():
+    """`pool_bins` divides by an integer, so it is a ceiling and not a promise.
+
+    129 bins asked down to 64 gives 64; asked down to 100 it gives 129, because the only factors
+    available are 1 and 2. A caller that assumed otherwise would draw a squashed picture.
+    """
+    grid = np.zeros((10, 129), dtype=np.float32)
+    assert pool_bins(grid, 64).shape == (10, 64)
+    assert pool_bins(grid, 100).shape == (10, 129)
+    assert pool_bins(grid, 1).shape == (10, 1)
+    # Never wider than it started, and never empty.
+    assert pool_bins(grid, 10_000).shape == (10, 129)
+
+
+def test_frame_starts_span_the_signal_without_running_off_it():
+    starts = sparse_frame_starts(10_000, 256, 200)
+    assert len(starts) == 200
+    assert starts[0] == 0
+    assert starts[-1] == 10_000 - 256, "the last window must end on the last sample"
+    assert np.all(np.diff(starts) >= 0)
+    # One window exactly: one frame, not two hundred identical ones. Shorter: none at all.
+    assert len(sparse_frame_starts(256, 256, 200)) == 1
+    assert len(sparse_frame_starts(255, 256, 200)) == 0
 
 
 def test_png_is_a_png():

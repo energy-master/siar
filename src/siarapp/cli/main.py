@@ -21,10 +21,12 @@ Subcommands:
 * ``siar-app scan``       — summarise a folder from headers alone.
 * ``siar-app run``        — scan a folder and build an output folder for the app.
 * ``siar-app runs``       — what has been run from this machine.
+* ``siar-app serve``      — browse an output folder from a laptop, over an ssh tunnel.
 """
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Sequence
 
@@ -33,8 +35,9 @@ from siarapp.branding import PRODUCT, TAGLINE, print_banner
 from siarapp.cli import commands
 from siarapp.config import python_supported, supported_python_text
 from siarapp.licensing import require_license
+from siarapp.runner import DEFAULT_MAX_BYTES
 
-__all__ = ["build_parser", "main"]
+__all__ = ["build_parser", "byte_size", "main"]
 
 #: Commands that run before the licence has been accepted.
 #:
@@ -44,6 +47,51 @@ __all__ = ["build_parser", "main"]
 #: same reason: they are where somebody goes to find out what they have just installed, and a
 #: prompt in front of the manual is a poor greeting.
 _UNGATED = frozenset({"version", "license", "quick-start", "quickstart", "readme"})
+
+#: ``siar-app serve``'s default port, spelled out here rather than imported from
+#: :mod:`siarapp.serve.http` — building the parser must not drag :mod:`http.server` into every
+#: invocation. :func:`siarapp.cli.commands.cmd_serve` imports the real constant and would fail its
+#: own test if the two ever disagreed.
+SERVE_PORT = 8420
+
+#: Multipliers ``--max-size`` accepts. Powers of 1024 under the names a disk uses: someone
+#: writing ``--max-size 550MB`` means the number their file manager showed them, and quibbling
+#: about MB versus MiB at a ceiling this rough would buy nothing.
+_SIZE_UNITS = {
+    "": 1,
+    "B": 1,
+    "K": 1024, "KB": 1024, "KIB": 1024,
+    "M": 1024**2, "MB": 1024**2, "MIB": 1024**2,
+    "G": 1024**3, "GB": 1024**3, "GIB": 1024**3,
+    "T": 1024**4, "TB": 1024**4, "TIB": 1024**4,
+}
+
+
+def byte_size(text: str) -> int:
+    """Parse a size like ``550MB``, ``1.5G`` or ``4096`` into bytes.
+
+    Args:
+        text: The value as typed. A bare number is bytes; ``0`` means no ceiling.
+
+    Returns:
+        The size in bytes.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not a number, carries an unknown unit, or is
+            negative — all three of which argparse turns into a usage error naming the flag.
+    """
+    raw = str(text).strip().replace(" ", "")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([A-Za-z]*)", raw)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a size — write bytes, or a number with a unit like 550MB"
+        )
+    unit = match.group(2).upper()
+    if unit not in _SIZE_UNITS:
+        raise argparse.ArgumentTypeError(
+            f"unknown size unit {match.group(2)!r} (KB, MB, GB, TB, or nothing for bytes)"
+        )
+    return int(float(match.group(1)) * _SIZE_UNITS[unit])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -240,6 +288,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="skip the per-recording lane thumbnails")
     out.add_argument("--limit", type=int, metavar="N",
                      help="stop after N recordings (a trial run over a big corpus)")
+    out.add_argument("--max-size", type=byte_size, default=DEFAULT_MAX_BYTES, metavar="SIZE",
+                     help=f"skip recordings larger than this, so one enormous file cannot take "
+                          f"the run's memory with it (default "
+                          f"{DEFAULT_MAX_BYTES // 1024**2}MB; 0 for no ceiling). Accepts KB, MB, "
+                          f"GB or a plain byte count")
     out.add_argument("--parallel", nargs="?", type=int, const=0, default=1, metavar="N",
                      help="scan N recordings at once, one process each; bare --parallel uses "
                           "every core this machine's memory will hold")
@@ -249,6 +302,34 @@ def build_parser() -> argparse.ArgumentParser:
                      help="draw the whole run in one live panel: progress, where the time is "
                           "going, what is being found, and a row per worker")
     out.add_argument("--quiet", "-q", action="store_true", help="no per-file progress")
+
+    p_serve = sub.add_parser(
+        "serve",
+        help="browse an output folder in a browser, without copying it",
+        description="Serve one output folder read-only over HTTP, so a scan that ran on a headless "
+        "box can be looked at from a laptop through an ssh tunnel. Binds 127.0.0.1 and requires a "
+        "token; there is no route that can change anything in the folder.",
+        epilog="On your laptop: ssh -N -L 8420:localhost:8420 <user>@<this-host>, then open the "
+               "URL this command prints.",
+    )
+    p_serve.add_argument("folder", nargs="?", metavar="DIR",
+                         help="output folder to serve (default: the most recent `siar-app run`)")
+    p_serve.add_argument("--port", type=int, default=SERVE_PORT, metavar="N",
+                         help=f"port to listen on (default {SERVE_PORT}; 0 picks a free one)")
+    p_serve.add_argument("--bind", default="127.0.0.1", metavar="ADDR",
+                         help="address to listen on (default 127.0.0.1 — the ssh -L end)")
+    p_serve.add_argument("--allow-remote", action="store_true",
+                         help="permit a --bind other than loopback, over plain HTTP")
+    p_serve.add_argument("--token", metavar="VALUE",
+                         help="use this token instead of a fresh random one")
+    p_serve.add_argument("--open", action="store_true",
+                         help="also open the page in a browser on THIS machine")
+    p_serve.add_argument("--no-audio", action="store_true",
+                         help="refuse to serve the recordings themselves")
+    p_serve.add_argument("--allow-origin", action="append", metavar="ORIGIN",
+                         help="let this web origin read the daemon (repeatable; none by default)")
+    p_serve.add_argument("--verbose", "-v", action="store_true",
+                         help="log one line per request")
 
     p_runs = sub.add_parser("runs", help="list the scans run from this machine")
     p_runs.add_argument("--limit", type=int, default=20, metavar="N")
@@ -274,6 +355,7 @@ _DISPATCH = {
     "scan": commands.cmd_scan,
     "run": commands.cmd_run,
     "runs": commands.cmd_runs,
+    "serve": commands.cmd_serve,
 }
 
 

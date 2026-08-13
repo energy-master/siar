@@ -17,6 +17,7 @@ import os
 
 import pytest
 
+from siarapp.io.performance import PHASES
 from siarapp.loader import load_local
 from siarapp.parallel import AlgorithmSpec, memory_ceiling, resolve_workers
 from siarapp.runner import RunOptions, run_folder
@@ -80,14 +81,35 @@ def test_a_worker_reports_its_lane_and_lanes_are_reused(corpus, stub, tmp_path):
     idle: list[int] = []
     run_folder(
         stub, str(corpus), str(tmp_path / "out"), RunOptions(workers=3),
-        on_start=lambda i, total, rel, dur, lane: starts.append((rel, lane)),
+        on_start=lambda i, total, rel, dur, lane, size: starts.append((rel, lane, size)),
         on_idle=idle.append,
     )
     assert len(starts) == 10
-    assert {lane for _rel, lane in starts} == {0, 1, 2}
+    assert {lane for _rel, lane, _size in starts} == {0, 1, 2}
+    # The display is told how big each recording is, not just what it is called.
+    assert all(size > 0 for _rel, _lane, size in starts)
     # Every lane is told when it runs dry, so a display never leaves a finished worker drawn
     # as though it were still on a file.
     assert sorted(idle) == [0, 1, 2]
+
+
+def test_a_worker_says_which_stage_it_is_on(corpus, stub, tmp_path):
+    """Stages cross the process boundary, or a parallel panel has nothing to say mid-file.
+
+    What arrives is not asserted file by file. A stage that reaches the parent after its own
+    file's result is dropped rather than drawn on a lane that has already moved on, and on
+    recordings this small some of the closing stages lose that race — which is the behaviour
+    wanted, not a fault. The claim here is that the channel exists and reports real stages
+    against real lanes; :mod:`tests.test_runner` pins the exact sequence on a serial run.
+    """
+    stages: list[tuple] = []
+    run_folder(
+        stub, str(corpus), str(tmp_path / "out"), RunOptions(workers=3),
+        on_stage=lambda lane, stage: stages.append((lane, stage)),
+    )
+    assert stages, "a parallel run reported no stages at all"
+    assert {stage for _lane, stage in stages} <= set(PHASES)
+    assert {lane for lane, _stage in stages} <= {0, 1, 2}
 
 
 def test_a_failing_recording_stays_one_row(corpus, tmp_path):

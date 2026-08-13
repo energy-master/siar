@@ -17,6 +17,8 @@ import os
 import re
 import sys
 
+from siarapp.io.performance import PHASES
+
 __all__ = [
     "BAR_CAP",
     "BAR_WIDTH",
@@ -38,8 +40,12 @@ __all__ = [
     "factor_text",
     "fit",
     "fit_path",
+    "human_bytes",
+    "named_recording",
     "set_colour",
     "share",
+    "size_and_length",
+    "stage_tag",
     "paint",
     "visible_len",
 ]
@@ -72,6 +78,13 @@ CYAN = "\033[36m"
 
 #: Cached decision from :func:`colour_enabled`. ``None`` until something first asks.
 _COLOUR: bool | None = None
+
+#: Columns a stage tag occupies, brackets included. Measured from the phase names themselves, so
+#: a sixth stage would widen the column rather than tear the row it sits in.
+_STAGE_WIDTH = max(len(name) for name in PHASES) + 2
+
+#: Columns a recording's name must keep before its size and length may share the row with it.
+_NAME_FLOOR = 16
 
 
 def colour_enabled() -> bool:
@@ -223,6 +236,79 @@ def factor_text(factor: float) -> str:
     if factor <= 0:
         return "—"
     return f"{factor:.1f}x" if factor >= 10 else f"{factor:.2f}x"
+
+
+def human_bytes(n: int | float | None) -> str:
+    """A size at a human scale. KiB not kB: this is a file on a disk, not a link speed."""
+    if not n:
+        return "0 B"
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
+
+
+def size_and_length(size_bytes: int, seconds: float) -> str:
+    """A recording's two dimensions together, as ``36.6 MiB · 6.7 min``.
+
+    The pair travels together on every display that names a recording, because either one alone
+    invites the wrong conclusion: a large file may be a short one at 384 kHz, and a long one may
+    be eight hours of 8 kHz that costs nothing.
+
+    Args:
+        size_bytes: What it occupies on disk. ``0`` leaves it out.
+        seconds: Its length, from the header. ``0`` leaves it out.
+
+    Returns:
+        The pair, one of them, or ``""`` when neither is known.
+    """
+    parts = []
+    if size_bytes:
+        parts.append(human_bytes(size_bytes))
+    if seconds > 0:
+        parts.append(duration(seconds))
+    return " · ".join(parts)
+
+
+def named_recording(rel_path: str, size_bytes: int, seconds: float, room: int) -> str:
+    """A recording's name with its size and length beside it, inside ``room`` columns.
+
+    The name wins when the two will not both fit. A row that has squeezed the path down to
+    ``…0410.wav`` to make space for ``3.4 GiB · 2.10 h`` has traded the only thing identifying
+    the recording for two facts about it, so below :data:`_NAME_FLOOR` columns the pair is
+    dropped and the path takes the width.
+
+    Args:
+        rel_path: Path relative to the scanned folder.
+        size_bytes: What it occupies on disk, or ``0``.
+        seconds: Its length from the header, or ``0``.
+        room: Columns available for all of it.
+
+    Returns:
+        The row's tail, at most ``room`` columns wide.
+    """
+    tail = size_and_length(size_bytes, seconds)
+    if tail and room - len(tail) - 2 >= _NAME_FLOOR:
+        return f"{fit_path(rel_path, room - len(tail) - 2)}  {tail}"
+    return fit_path(rel_path, room)
+
+
+def stage_tag(stage: str) -> str:
+    """Which stage of a recording is running, as a fixed-width ``[fft]``.
+
+    Fixed width, padded to the longest of :data:`~siarapp.io.performance.PHASES`, because this
+    sits mid-line on a display that redraws four times a second: a tag that changed width would
+    shuffle the recording's name sideways every time the stage moved on.
+
+    Args:
+        stage: A phase name, or ``""`` before a recording has reached one.
+
+    Returns:
+        The tag, or the same width in spaces when there is no stage to name.
+    """
+    return f"[{stage}]".ljust(_STAGE_WIDTH) if stage else " " * _STAGE_WIDTH
 
 
 def share(seconds: float, total: float) -> str:

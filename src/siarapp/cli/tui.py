@@ -63,8 +63,10 @@ from siarapp.cli.format import (
     factor_text,
     fit,
     fit_path,
+    named_recording,
     paint,
     share,
+    stage_tag,
     visible_len,
 )
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
@@ -135,7 +137,7 @@ class TuiDisplay:
     """
 
     def __init__(self, algorithm: str = "", workers: int = 1, source: str = "",
-                 out: str = "") -> None:
+                 out: str = "", prior_rate: float = 0.0) -> None:
         self._algorithm = algorithm or "scan"
         self._where = f"{source}  →  {out}" if source and out else (source or out)
         self._lock = threading.Lock()
@@ -156,9 +158,15 @@ class TuiDisplay:
         # recording reports no duration of its own, and the bar still has to move past it.
         self._planned: dict[str, float] = {}
         # Learned cost inside one worker — wall seconds per second of audio — which is what a
-        # lane's own bar is drawn from.
+        # lane's own bar is drawn from. Seeded from the last run of this algorithm on this
+        # machine so the first round of the run has bars at all; replaced by this run's own
+        # figure the moment a recording lands.
+        self._prior = max(0.0, float(prior_rate))
         self._scan_audio = 0.0
         self._scan_wall = 0.0
+        # And per lane, so a worker slower than its neighbours reads as a number on its own row.
+        self._lane_audio: dict[int, float] = {}
+        self._lane_wall: dict[int, float] = {}
         self._structures = 0
         self._shapes: dict[str, int] = {}
         self._phases: dict[str, float] = {}
@@ -190,19 +198,31 @@ class TuiDisplay:
         self._thread.start()
 
     def on_start(self, index: int, total: int, rel_path: str, duration_sec: float,
-                 lane: int = 0) -> None:
+                 lane: int = 0, size_bytes: int = 0) -> None:
         """A worker has taken a recording."""
         with self._lock:
             self._files_total = max(self._files_total, total)
             self._planned[rel_path] = duration_sec
             self._ensure_lanes(lane)
-            self._lanes[lane] = (index, rel_path, duration_sec, time.time())
+            self._lanes[lane] = (index, rel_path, duration_sec, size_bytes, time.time(), "")
 
     def on_idle(self, lane: int) -> None:
         """A worker has run out of work — the tail of the run."""
         with self._lock:
             self._ensure_lanes(lane)
             self._lanes[lane] = None
+
+    def on_stage(self, lane: int, stage: str) -> None:
+        """A worker has moved on to another stage of the recording it holds.
+
+        The one thing that changes on a lane's row between taking a recording and finishing it,
+        and on a long file that is minutes of otherwise motionless screen.
+        """
+        with self._lock:
+            self._ensure_lanes(lane)
+            entry = self._lanes[lane]
+            if entry is not None:
+                self._lanes[lane] = entry[:5] + (stage,)
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into every counter the frame draws."""
@@ -218,6 +238,9 @@ class TuiDisplay:
             if result.status == "scanned" and result.duration_sec and result.elapsed_sec:
                 self._scan_audio += float(result.duration_sec)
                 self._scan_wall += float(result.elapsed_sec)
+                lane = int(result.lane)
+                self._lane_audio[lane] = self._lane_audio.get(lane, 0.0) + result.duration_sec
+                self._lane_wall[lane] = self._lane_wall.get(lane, 0.0) + result.elapsed_sec
             self._structures += result.count
             for shape, n in result.shapes.items():
                 self._shapes[shape] = self._shapes.get(shape, 0) + n
@@ -352,10 +375,48 @@ class TuiDisplay:
         sys.stdout.flush()
 
     def _cost_rate(self) -> float:
-        """Wall seconds one worker spends per second of audio, or ``0.0`` before it is known."""
+        """Wall seconds one worker spends per second of audio, or ``0.0`` when unknowable.
+
+        This run's own measurement once anything has finished; the last run of this algorithm
+        before that. Only zero on a machine that has never run it, where there is genuinely
+        nothing to draw a bar from.
+        """
         if self._scan_audio <= 0 or self._scan_wall <= 0:
-            return 0.0
+            return self._prior
         return self._scan_wall / self._scan_audio
+
+    def _lane_factor(self, lane: int) -> float:
+        """One worker's own realtime factor: audio seconds scanned per wall second in that lane.
+
+        Zero — drawn as ``—`` — until that lane has finished a recording. A worker's speed is
+        only knowable from a worker's completed work, and the run-wide figure divided by the pool
+        would hide exactly what the rows exist to show: the lane that is slower than the rest.
+        """
+        return realtime_factor(self._lane_audio.get(lane, 0.0), self._lane_wall.get(lane, 0.0))
+
+    def _lane_fraction(self, entry: tuple | None, now: float) -> float:
+        """How far through its recording one lane is, ``0.0`` when there is no way to tell."""
+        if entry is None:
+            return 0.0
+        seconds, started_at = entry[2], entry[4]
+        estimate = seconds * self._cost_rate()
+        if estimate <= 0:
+            return 0.0
+        return min(BAR_CAP / 100.0, (now - started_at) / estimate)
+
+    def _audio_in_flight(self, now: float) -> float:
+        """Audio inside the workers right now, counted by how far through it each of them is.
+
+        The overall bar counts recordings when they land, and on a pool of sixteen workers each
+        half-way through an hour-long file that is eight hours of audio the bar knows nothing
+        about — it reads 2% while every row under it reads 40%. Counting the part-done work is
+        an estimate, and it is drawn from the same throughput the rows are, so the bar and the
+        rows now agree with each other and with the clock.
+        """
+        return sum(
+            self._lane_fraction(entry, now) * entry[2]
+            for entry in self._lanes if entry is not None
+        )
 
     def _render(self, now: float) -> list[str]:
         """The whole screen, exactly as many lines and columns as the terminal has.
@@ -375,6 +436,8 @@ class TuiDisplay:
         inner = width - 4
         height = max(_MIN_HEIGHT, size.lines)
         elapsed = max(0.0, now - self._started)
+        # Nothing is in flight once the run is over, so a held panel reports only what finished.
+        in_flight = 0.0 if self._finished else self._audio_in_flight(now)
 
         block = progress_block(
             started=self._started,
@@ -382,14 +445,19 @@ class TuiDisplay:
             files_done=self._files_done,
             files_worked=self._files_worked,
             audio_total_sec=self._audio_total,
-            audio_done_sec=self._audio_done,
-            audio_worked_sec=self._audio_worked,
+            # Part-done recordings included: see :meth:`_audio_in_flight`. A held panel counts
+            # only what finished — nothing is in flight once the run is over.
+            audio_done_sec=self._audio_done + in_flight,
+            # In the estimate too, or the panel draws a bar for the first hour of a run and still
+            # says "estimating" beside it: the ETA is computed from audio worked per wall second,
+            # and until a file lands all of the work done is in flight.
+            audio_worked_sec=self._audio_worked + in_flight,
             now=now,
         )
 
         head = f"{self._algorithm} · {self._workers} worker{'' if self._workers == 1 else 's'}"
         body = [
-            _row(self._bar_line(block, inner), inner),
+            _row(self._bar_line(block, elapsed, in_flight, inner), inner),
             _row(self._totals_line(block, elapsed, inner), inner),
         ]
         if self._where:
@@ -458,32 +526,48 @@ class TuiDisplay:
                           for kind, text in shown])
         return out
 
-    def _bar_line(self, block: dict, inner: int) -> str:
-        """The overall bar: fraction of the corpus, by audio, with the file count beside it."""
+    def _bar_line(self, block: dict, elapsed: float, in_flight: float, inner: int) -> str:
+        """The overall bar: fraction of the corpus by audio, the file count, and the run's speed.
+
+        The speed sits here rather than only on the line below because this is the line somebody
+        glances at, and "how far through" and "how fast" are one question asked twice.
+
+        It counts the audio inside the workers as well as the audio they have finished, and says
+        so with a ``~``. A pool of sixteen workers an hour into their first recordings has done
+        sixteen hours of real work, and a speed that reads ``—`` until the first file lands is
+        not more truthful than a marked estimate — it is just less use.
+        """
         fraction = float(block["fraction"])
+        # A part-done recording may not carry the bar to the end. The estimate is allowed to fill
+        # the bar and it is allowed to be wrong, but "100%" on a run that is still working is the
+        # one thing it must never say — the same rule the lane bars follow.
+        if in_flight > 0 and not self._finished:
+            fraction = min(fraction, BAR_CAP / 100.0)
         counts = f"{self._files_done}/{self._files_total} files"
-        audio = f"{duration(self._audio_done)} of {duration(self._audio_total)}"
-        # The bar takes whatever the two labels leave, so a wide terminal gets a wide bar rather
+        about = "~" if in_flight > 0 else ""
+        audio = (f"{about}{duration(self._audio_done + in_flight)} "
+                 f"of {duration(self._audio_total)}")
+        factor = realtime_factor(self._audio_worked + in_flight, elapsed)
+        # Green above realtime, amber below it: under 1x an overnight scan does not finish
+        # overnight, and that is worth seeing before the morning.
+        speed = paint(f"{about if factor > 0 else ''}{factor_text(factor)} realtime",
+                      GREEN if factor >= 1 else YELLOW)
+        # The bar takes whatever the labels leave, so a wide terminal gets a wide bar rather
         # than a fixed one with an acre of blank beside it.
-        bar_width = max(8, inner - len(counts) - len(audio) - 12)
+        bar_width = max(8, inner - len(counts) - len(audio) - visible_len(speed) - 14)
         filled = int(round(max(0.0, min(1.0, fraction)) * bar_width))
         drawn = paint("█" * filled, GREEN) + paint("░" * (bar_width - filled), DIM)
         return (f"{drawn} {paint(f'{fraction * 100:3.0f}%', BOLD)}  "
-                f"{counts}  {paint(audio, DIM)}")
+                f"{counts}  {paint(audio, DIM)}  {speed}")
 
     def _totals_line(self, block: dict, elapsed: float, inner: int) -> str:
-        """The one line to read if you only read one: speed, when it ends, what it has found."""
+        """The one line to read if you only read one: when it ends, and what it has found."""
         eta = block["eta_sec"]
-        factor = realtime_factor(self._audio_worked, elapsed)
-        # Green above realtime, amber below it: under 1x an overnight scan does not finish
-        # overnight, and that is worth seeing before the morning.
-        speed = paint(factor_text(factor), GREEN if factor >= 1 else YELLOW)
         if self._finished:
             when = paint("finished", GREEN)
         else:
             when = "estimating" if eta is None else f"{clock(eta)} left"
         parts = [
-            f"{speed} realtime",
             when,
             f"{paint(f'{self._structures:,}', BOLD)} "
             f"structure{'' if self._structures == 1 else 's'}",
@@ -599,27 +683,28 @@ class TuiDisplay:
         """
         if not self._lanes:
             return []
-        rate = self._cost_rate()
         lines = []
         for lane, entry in enumerate(self._lanes):
             label = f"{lane + 1:>3}  "
             if entry is None:
                 lines.append(f"{label}{paint('·' * _LANE_BAR + '   idle', DIM)}")
                 continue
-            _index, rel_path, seconds, started_at = entry
+            _index, rel_path, seconds, size_bytes, started_at, stage = entry
             spent = now - started_at
-            estimate = seconds * rate
-            if estimate > 0:
-                pct = min(BAR_CAP, 100.0 * spent / estimate)
-                filled = int(round(_LANE_BAR * pct / 100.0))
+            fraction = self._lane_fraction(entry, now)
+            if fraction > 0:
+                filled = int(round(_LANE_BAR * fraction))
                 stat = (paint("█" * filled, GREEN) + paint("░" * (_LANE_BAR - filled), DIM)
-                        + f" {pct:3.0f}% {spent:5.0f}s")
+                        + f" {100.0 * fraction:3.0f}% {spent:5.0f}s")
             else:
-                # Nothing has finished yet, so there is no throughput to predict with. Elapsed
-                # alone: an estimate drawn before the first result is invention.
+                # Nothing finished and no prior for this algorithm on this machine, so there is
+                # no throughput to predict with. Elapsed alone: a bar from nothing is invention.
                 stat = paint("░" * _LANE_BAR, DIM) + f"   —  {spent:5.0f}s"
+            # This lane's own speed, beside this lane's own bar.
+            stat += "  " + paint(f"{factor_text(self._lane_factor(lane)):>7}", CYAN)
+            stat += "  " + paint(stage_tag(stage), CYAN)
             room = inner - len(label) - visible_len(stat) - 2
-            lines.append(f"{label}{stat}  {fit_path(rel_path, room)}")
+            lines.append(f"{label}{stat}  {named_recording(rel_path, size_bytes, seconds, room)}")
         return lines
 
     def _recent_lines(self, inner: int, limit: int) -> list[str]:

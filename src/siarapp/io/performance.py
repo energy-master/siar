@@ -34,9 +34,11 @@ import platform
 import time
 
 __all__ = [
+    "MAIN_PHASE",
     "PERFORMANCE_NAME",
     "PERFORMANCE_FORMAT",
     "PHASES",
+    "TYPICAL_SHARES",
     "performance_document",
     "phase_totals",
     "progress_block",
@@ -60,6 +62,20 @@ __all__ = [
 #: defines what a run's cost *is*, and it is imported by the runner rather than the other way
 #: round.
 PHASES = ("decode", "fft", "scan", "write", "thumbnail")
+
+#: Which stage is the run. Named rather than assumed, because three separate readers act on it:
+#: the overall progress bar counts a recording as done in proportion to how far its scan has got,
+#: the closing table calls it out, and the docs say why `--parallel` is the only lever on it.
+MAIN_PHASE = "scan"
+
+#: How a recording's time typically divides, when nothing better is known.
+#:
+#: Only ever a starting point: every display replaces these with what it has measured as soon as
+#: one recording lands, and the run history carries the last run's real split. They exist because
+#: the alternative for the first minute of a first run is treating a recording as uniform, which
+#: is badly wrong in one direction — the scan is nearly all of it, so a bar that spreads the time
+#: evenly is at 99% before the scan has begun.
+TYPICAL_SHARES = {"decode": 0.03, "fft": 0.06, "scan": 0.89, "write": 0.01, "thumbnail": 0.01}
 
 #: Written at the root of every output folder.
 PERFORMANCE_NAME = "siar-app-performance.json"

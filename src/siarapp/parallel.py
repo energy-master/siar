@@ -67,6 +67,12 @@ _WORKER_OVERHEAD_BYTES = 256 * 1024**2
 #: copy at its peak. Measured against the transform in :mod:`siarapp.dsp.stft`.
 _GRID_PEAK_FACTOR = 1.6
 
+#: How long the pool may sit waiting on a completion before it looks at the stage queue again.
+#: Well inside the displays' own quarter-second tick, so a stage change is delivered before the
+#: next repaint rather than one frame after it, and cheap enough at twenty wakeups a second to be
+#: invisible against a run measured in hours.
+_STAGE_POLL_SEC = 0.05
+
 #: Thread-count variables that BLAS libraries read at import time. A worker per core, each
 #: running a library that also wants a thread per core, is how a parallel run ends up slower than
 #: a serial one. Set in the parent before any worker starts, and only when the user has not
@@ -240,7 +246,7 @@ _WORKER: dict = {}
 
 
 def _init_worker(spec: AlgorithmSpec, out_root: str, source_root: str, plan: dict,
-                 options: Any) -> None:
+                 options: Any, stages: Any = None) -> None:
     """Load the algorithm and open the output folder in a fresh worker process.
 
     Raising here breaks the pool, which is the right outcome: an algorithm that will not load is
@@ -252,6 +258,7 @@ def _init_worker(spec: AlgorithmSpec, out_root: str, source_root: str, plan: dic
     _WORKER["out"] = OutputFolder(out_root, source_root, link=options.link)
     _WORKER["plan"] = plan
     _WORKER["options"] = options
+    _WORKER["stages"] = stages
 
 
 def _scan_path(index: int, path: str) -> tuple:
@@ -264,7 +271,31 @@ def _scan_path(index: int, path: str) -> tuple:
 
     return index, scan_file(
         _WORKER["handle"], path, _WORKER["out"], _WORKER["plan"], _WORKER["options"],
+        _stage_reporter(index),
     )
+
+
+def _stage_reporter(index: int) -> Callable[[str], None] | None:
+    """A callback that posts this file's stage changes back to the parent, or ``None``.
+
+    ``None`` when nobody upstream asked for stages, so a run whose display does not draw them
+    does not pay for five queue writes per recording.
+
+    A failed ``put`` is dropped on purpose. The queue is a display feed: a worker that cannot say
+    what stage it is on must still finish the recording, and a scan that died because a progress
+    message would not send would be an absurd way to lose four hours.
+    """
+    queue = _WORKER.get("stages")
+    if queue is None:
+        return None
+
+    def report(stage: str) -> None:
+        try:
+            queue.put_nowait((index, stage))
+        except Exception:  # noqa: BLE001 - a full or closed queue is not this recording's problem
+            pass
+
+    return report
 
 
 # -- the pool --------------------------------------------------------------------------------
@@ -277,10 +308,12 @@ def scan_parallel(
     plan: dict,
     options: Any,
     durations: list[float],
+    sizes: list[int],
     workers: int,
     *,
-    on_start: Callable[[int, int, str, float, int], None] | None = None,
+    on_start: Callable[[int, int, str, float, int, int], None] | None = None,
     on_idle: Callable[[int], None] | None = None,
+    on_stage: Callable[[int, str], None] | None = None,
 ) -> Iterator[tuple]:
     """Scan every file across ``workers`` processes, yielding results as they land.
 
@@ -292,11 +325,16 @@ def scan_parallel(
         plan: The grid from :func:`siarapp.runner.plan_grid`.
         options: The :class:`~siarapp.runner.RunOptions`.
         durations: One duration per file, from the headers, for the display.
+        sizes: One size in bytes per file, for the display.
         workers: How many processes to run.
-        on_start: ``(index, total, rel_path, duration_sec, lane)`` as each file is handed to a
-            worker. ``lane`` is a display slot, ``0`` to ``workers - 1``, held for as long as
-            that file is being scanned and then reused by the next one.
+        on_start: ``(index, total, rel_path, duration_sec, lane, size_bytes)`` as each file is
+            handed to a worker. ``lane`` is a display slot, ``0`` to ``workers - 1``, held for as
+            long as that file is being scanned and then reused by the next one.
         on_idle: ``(lane)`` when a lane has no more work — only at the tail of a run.
+        on_stage: ``(lane, stage)`` as a worker moves onto each stage of its recording. Workers
+            post these to a queue which this generator drains while it waits, so a lane's row can
+            say what it is doing during the many minutes a scan takes. Passing ``None`` leaves
+            the queue uncreated and the workers silent.
 
     Yields:
         ``(index, FileResult)`` in completion order, which is not input order: a two-second clip
@@ -310,15 +348,19 @@ def scan_parallel(
     """
     total = len(files)
     limit_library_threads()
+    context = get_context("spawn")
     pending = iter(list(enumerate(files)))
     free_lanes = list(range(workers - 1, -1, -1))
     inflight: dict = {}
+    # Which lane is drawing which file, so a stage posted by index can be delivered to a row.
+    lane_of: dict[int, int] = {}
+    stages = context.Queue() if on_stage is not None else None
 
     executor = ProcessPoolExecutor(
         max_workers=workers,
-        mp_context=get_context("spawn"),
+        mp_context=context,
         initializer=_init_worker,
-        initargs=(spec, out.root, out.source_root, plan, options),
+        initargs=(spec, out.root, out.source_root, plan, options, stages),
     )
 
     def submit_next() -> bool:
@@ -328,10 +370,26 @@ def scan_parallel(
         except StopIteration:
             return False
         lane = free_lanes.pop()
+        lane_of[index] = lane
         inflight[executor.submit(_scan_path, index, path)] = lane
         if on_start is not None:
-            on_start(index + 1, total, out.rel_path(path), durations[index], lane)
+            on_start(index + 1, total, out.rel_path(path), durations[index], lane, sizes[index])
         return True
+
+    def drain_stages() -> None:
+        """Deliver whatever the workers have said about their stages since the last look.
+
+        A stage for a file whose result has already been taken is dropped: the lane has moved on
+        to another recording and drawing the old one's stage on it would be a lie.
+        """
+        while stages is not None:
+            try:
+                index, stage = stages.get_nowait()
+            except Exception:  # noqa: BLE001 - Empty, and anything a closing queue raises
+                return
+            lane = lane_of.get(index)
+            if lane is not None:
+                on_stage(lane, stage)
 
     try:
         for _ in range(workers):
@@ -343,10 +401,16 @@ def scan_parallel(
                 break
 
         while inflight:
-            done, _not_done = wait(inflight, return_when=FIRST_COMPLETED)
+            # Waited on with a timeout rather than until the next completion: a recording can be
+            # inside `scan` for twenty minutes, and the stage messages arriving during it are
+            # exactly what the display has to show for that time.
+            done, _not_done = wait(inflight, return_when=FIRST_COMPLETED,
+                                   timeout=_STAGE_POLL_SEC if stages is not None else None)
+            drain_stages()
             for future in done:
                 lane = inflight.pop(future)
                 index, result = future.result()
+                lane_of.pop(index, None)
                 result.lane = lane
                 free_lanes.append(lane)
                 # Refilled before the result is handed up, so the worker starts its next file
@@ -361,6 +425,8 @@ def scan_parallel(
         # Not `with`: on Ctrl-C or a broken pool the point is to stop, and shutting down with
         # wait=True would sit here until every worker finished the file it was on.
         executor.shutdown(wait=False, cancel_futures=True)
+        if stages is not None:
+            stages.close()
 
 
 def _broken_message(workers: int, error: Exception) -> str:

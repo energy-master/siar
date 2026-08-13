@@ -22,7 +22,7 @@ window.QUICKSTART_TEXT = `
 
 eyebrow: SIaR · Signal Information and Reconnaissance
 headline: Build datasets from your data. 
-intro: Fifteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
+intro: Sixteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
 prompt: user@vi:~$
 window: user@vi: ~
 railtitle: Steps
@@ -61,7 +61,7 @@ rail: Check the build platform tag
 note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
 term:
 $ siar-app version
-siar-app 0.4.0
+siar-app 0.5.0
 ! platform     linux-x86_64-cp313
 python       3.13.1
 licence      MIT (not yet accepted)
@@ -210,6 +210,29 @@ $ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paral
 . # Ctrl-Q closes the finished panel. Piped into a log it falls back to one line per recording.
 
 --- slide ---
+title: Look at a scan on another machine
+rail: View it remotely
+note: Scanned on a server? The output folder holds a copy of every recording, so it is the one thing you cannot conveniently move. ~siar-app serve~ serves it **where it is**, read-only, and prints the ~ssh -L~ line to copy. Opening a lane sends a **reduced spectrogram** computed on that box — about 350 KB whatever the recording's length — not the audio.
+term:
+$ siar-app serve ~/survey-scan
+. FIELD       VALUE
+- ----------  ----------------------------------------------
+. folder      /home/user/survey-scan
+recordings  412  (411 scanned, 1 errors)
+. audio       27.40 h
+! structures  9,043
+. state       complete
+! url         http://127.0.0.1:8420/?t=jLhljXDeneOuLwuEqn5w
+
+. On your laptop, run:
+$ ssh -N -L 8420:localhost:8420 you@survey-box
+. then open the URL above.
+
++ Read-only: nothing this serves can change the folder.
+
+. # Serve a run that is still going — the page fills as recordings land.
+
+--- slide ---
 title: Peek at the result
 rail: Peek at the result
 note: The output folder mirrors your input folder's layout. In the web app use **Open folder** and pick it or drop the folder into the Ident dynamics webapp.
@@ -256,7 +279,7 @@ rail: Update / Delete application
 note: The token, licence, history and cached algorithms all survive an app upgrade.
 term:
 $ uv tool upgrade siar-app
-. Updated siar-app v0.3.0 -> v0.4.0
+. Updated siar-app v0.4.0 -> v0.5.0
 
 . # Installed from git, so uv compares version numbers. Same number, newer commit?
 $ uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git

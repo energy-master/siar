@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "siar-app"
-version = "0.4.0"
+version = "0.5.0"
 description = "Run the IDent Dynamics structure scanners over a folder of recordings"
 readme = "README.md"
 # An equality, not a floor. The scanner bundles this CLI downloads are PyArmor-obfuscated, and

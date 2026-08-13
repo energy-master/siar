@@ -134,7 +134,9 @@ def test_the_bar_and_the_totals_survive_a_terminal_too_short_for_the_rest(size):
     display = _busy(TuiDisplay("all_structures"), workers=16)
     frame = display._render(time.time())
     assert "0/12 files" not in _plain(frame[1]), "the bar should have moved"
-    assert "realtime" in _plain(frame[2])
+    # The speed rides on the bar line itself; the line under it is what is left to do.
+    assert "realtime" in _plain(frame[1])
+    assert "left" in _plain(frame[2])
     # The last line closes the box however much had to be dropped above it.
     assert _plain(frame[-1]).startswith("╰")
 
