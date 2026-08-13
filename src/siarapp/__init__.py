@@ -14,6 +14,10 @@ manifest = run_folder(handle, "~/survey-audio", "~/survey-scan", RunOptions(resu
 print(manifest["structures"], "structures in", manifest["files"], "files")
 ```
 
+``RunOptions(workers=N)`` scans N recordings at once, in worker processes started by spawn — so
+a script that uses it must guard its entry point with ``if __name__ == "__main__":``, the same
+rule every :mod:`multiprocessing` program follows. The CLI's own entry point already does.
+
 The algorithms are not in this package. They download as obfuscated bundles and are cached
 under ``~/.siar-app/algorithms/``; see :mod:`siarapp.loader`. What lives here is
 everything on the open side of that line — the decode, the transform, the output folder — and
@@ -21,7 +25,7 @@ everything on the open side of that line — the decode, the transform, the outp
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from siarapp.api import ApiError, AuthError, Client, client_from_credentials
 from siarapp.grid import FrameGrid, Region, ScannerAlgorithm, ScannerError

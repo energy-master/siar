@@ -43,17 +43,19 @@ PERFORMANCE_NAME = "siar-app-performance.json"
 PERFORMANCE_FORMAT = "siar-app-performance-v1"
 
 
-def _machine() -> dict:
+def _machine(workers: int = 1) -> dict:
     """What ran the scan, so two timings can be compared honestly.
 
     A realtime factor with no machine attached is close to meaningless — the same scan is 8x on
     a workstation and 0.9x on a vessel laptop, and a user comparing two runs needs to know which
-    they are looking at.
+    they are looking at. ``workers`` is here for the same reason and matters more: the same
+    machine is sixteen times faster at the same algorithm depending on one flag.
     """
     return {
         "platform": f"{platform.system()} {platform.machine()}".strip(),
         "python": platform.python_version(),
         "cpus": os.cpu_count() or 0,
+        "workers": int(workers),
     }
 
 
@@ -155,6 +157,7 @@ def performance_document(
     started: float,
     results,
     stft: dict | None = None,
+    workers: int = 1,
     progress: dict | None = None,
 ) -> dict:
     """Build the performance report from the finished per-file results.
@@ -167,6 +170,7 @@ def performance_document(
         results: The ``FileResult`` objects, in the order they were scanned.
         stft: The analysis grid — the single biggest lever on speed, and the first thing to
             look at when a run is slower than expected.
+        workers: How many recordings were scanned at once.
         progress: The block from :func:`progress_block`. Omitted only by a caller that has no
             notion of a corpus; the run loop always supplies one.
 
@@ -202,15 +206,18 @@ def performance_document(
         "progress": progress or progress_block(
             started=started, files_total=len(results), files_done=len(results), complete=True,
         ),
-        "machine": _machine(),
+        "machine": _machine(workers),
         "stft": stft or {},
         "totals": {
             "files": len(results),
             "files_scanned": len(scanned),
             "audio_sec": round(audio_sec, 2),
-            # Two different times, and the gap between them is the answer to "why is this
-            # slower than the sum of its parts": `wall` includes decoding, thumbnails, copying
-            # the audio and writing the sidecars, while `scan_sec` is the algorithm alone.
+            # Two different times, and the gap between them carries two answers. `wall` includes
+            # decoding, thumbnails, copying the audio and writing the sidecars, while `scan_sec`
+            # is the algorithm alone — so on a serial run `wall` is the larger of the two and the
+            # difference is overhead. On a `--parallel` run `scan_sec` is the larger, because it
+            # sums time that several workers spent at once, and dividing it by `wall` says how
+            # much of the pool was actually working.
             "wall_sec": round(wall, 2),
             "scan_sec": round(scan_sec, 2),
             "realtime_factor": _factor(audio_sec, wall),

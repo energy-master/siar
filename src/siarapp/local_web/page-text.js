@@ -61,7 +61,7 @@ rail: Check the build platform tag
 note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
 term:
 $ siar-app version
-siar-app 0.1.0
+siar-app 0.2.0
 ! platform     linux-x86_64-cp313
 python       3.13.1
 licence      MIT (not yet accepted)
@@ -158,6 +158,20 @@ $ siar-app run ~/survey-audio --algorithm all_structures --out ~/survey-scan
 412 file(s), 27.40 h of audio, in 1841.2s
 ! 9,043 structures: 122 click_train, 4188 click, 219 sweep, 3901 tonal, 613 patch
 . 1 file(s) error
+
+--- slide ---
+title: Scan on every core
+rail: Use every core
+note: Recordings are independent, so a corpus scans in parallel. Bare ~--parallel~ takes every core the machine's memory will hold; ~--parallel 8~ fixes the number. The output folder is **identical either way**, and one row per worker means a stalled lane is visible rather than buried.
+term:
+$ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --parallel
+! [████████████░░░░░░░░░░░░]  48%  12043/25318 files  201.4 h of 418.2 h audio
+. 12 workers  ·  38.1x realtime  ·  5:24:11 elapsed  ·  5:41:03 left  ·  91043 structures
+  1  ████████░░░░░░  61%    38s  station-a/2026-07-03/0410.wav
+  2  ██░░░░░░░░░░░░  17%    11s  station-a/2026-07-03/0420.wav
+  3  ··············    —      idle
+
+. # Each worker holds one recording's grid: memory, not cores, is usually the limit.
 
 --- slide ---
 title: Peek at the result

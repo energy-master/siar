@@ -57,6 +57,7 @@ __all__ = [
     "load_cached",
     "load_local",
     "load_remote",
+    "load_unpacked",
     "unpack_bundle",
 ]
 
@@ -330,6 +331,28 @@ def _load_tree(root: str, slug: str, platform_tag: str) -> AlgorithmHandle:
 
 
 # -- the three entry points ----------------------------------------------------------------
+
+
+def load_unpacked(root: str, slug: str, platform_tag: str = "") -> AlgorithmHandle:
+    """Load a bundle that is already unpacked at ``root``.
+
+    The entry point a worker process uses (see :mod:`siarapp.parallel`): the parent has already
+    downloaded and unpacked the bundle, so a worker is given the tree directly rather than a slug
+    it would have to look up — no network, no cache lookup, and no chance of a second process
+    resolving a different build than the one the run was started with.
+
+    Args:
+        root: The unpacked bundle directory.
+        slug: The algorithm slug, for error messages and the handle.
+        platform_tag: Build tag to record when the manifest does not carry one.
+
+    Returns:
+        The loaded :class:`AlgorithmHandle`.
+
+    Raises:
+        ScannerError: On any import or contract failure.
+    """
+    return _load_tree(root, slug, platform_tag or default_platform_tag())
 
 
 def load_cached(slug: str, platform_tag: str | None = None) -> AlgorithmHandle | None:

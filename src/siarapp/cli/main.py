@@ -240,6 +240,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="skip the per-recording lane thumbnails")
     out.add_argument("--limit", type=int, metavar="N",
                      help="stop after N recordings (a trial run over a big corpus)")
+    out.add_argument("--parallel", nargs="?", type=int, const=0, default=1, metavar="N",
+                     help="scan N recordings at once, one process each; bare --parallel uses "
+                          "every core this machine's memory will hold")
     out.add_argument("--no-recursive", action="store_true",
                      help="only the top level of the folder")
     out.add_argument("--quiet", "-q", action="store_true", help="no per-file progress")

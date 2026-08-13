@@ -206,6 +206,7 @@ Useful flags:
 
 | Flag | Why |
 |---|---|
+| `--parallel` | Scan several recordings at once, one process per core. The single biggest lever on a large corpus. |
 | `--resume` | Carry on where an interrupted run stopped. Safe to pass always. |
 | `--limit 20` | Trial the algorithm on twenty files before committing to a corpus. |
 | `--link` | Hardlink the audio into the output folder instead of copying it. Same filesystem only; falls back to a copy. |
@@ -216,6 +217,40 @@ Useful flags:
 | `--no-thumbnails` | Skip the lane previews. Saves a few milliseconds per file and makes the folder less useful. |
 
 Interrupt it with Ctrl-C at any point; nothing is half-written, and `--resume` picks it up.
+
+### Scanning on every core
+
+Recordings are independent of each other, so a corpus is the easiest kind of thing to scan in
+parallel. `--parallel` runs one worker process per recording in flight:
+
+```bash
+siar-app run ~/three-week-stream --algorithm all_structures --out ~/stream-scan --parallel
+```
+
+Bare `--parallel` uses as many workers as the machine will hold; `--parallel 8` fixes the number.
+Twelve hours of work on one core is an hour on twelve, and the output folder is identical either
+way — the same sidecars, byte for byte, because a worker is handed the same grid and the same
+parameters wherever it runs.
+
+The display becomes one row per worker, so a stalled lane is visible rather than buried:
+
+```
+[████████████░░░░░░░░░░░░]  48%  12043/25318 files  201.4 h of 418.2 h audio
+12 workers  ·  38.1x realtime  ·  5:24:11 elapsed  ·  5:41:03 left  ·  91043 structures
+  1  ████████░░░░░░  61%    38s  station-a/2026-07-03/0410.wav
+  2  ██░░░░░░░░░░░░  17%    11s  station-a/2026-07-03/0420.wav
+  3  ··············    —      idle
+```
+
+Two things to know before turning it up:
+
+* **Memory, not cores, is usually the limit.** Each worker holds one recording's magnitude grid,
+  so the pool costs the largest recording in the corpus times the number of workers. The count
+  chosen by bare `--parallel` is capped to fit; an explicit `--parallel N` is obeyed with a
+  warning if it will not. Raising `--hop` shrinks every grid and buys workers.
+* **The manifest lists recordings in the order they finished**, which on a parallel run is not
+  folder order — a ten-second clip submitted after a forty-minute drift recording is written
+  first. Nothing reads the manifest in order; the sidecars are what the app pairs to lanes.
 
 ## 5. Open the result in IDent Dynamics
 
@@ -277,7 +312,7 @@ Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.1.0 · © Vixen Intelligence 2026
+siar-app 0.2.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
@@ -288,7 +323,7 @@ invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 
 ```bash
 $ siar-app version
-siar-app 0.1.0
+siar-app 0.2.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
@@ -519,6 +554,7 @@ else stays a string. An algorithm that wanted a float should not receive `"2.5"`
 | `--link` | hardlink the audio instead of copying it (same filesystem only) |
 | `--no-thumbnails` | skip the per-recording lane previews |
 | `--limit N` | stop after N recordings — a trial run over a big corpus |
+| `--parallel [N]` | scan N recordings at once, one process each; bare `--parallel` uses every core the machine's memory will hold |
 | `--no-recursive` | only the top level of the folder |
 | `--quiet`, `-q` | no per-file progress |
 
@@ -684,17 +720,21 @@ that failed and why.
 `siar-app-performance.json` records what the run cost: per file and in total, the audio
 duration, the compute wall time, and the **realtime factor** — 3.7 means the scan ran 3.7 times faster than the audio it scanned. It also records the
 machine because a factor with no machine attached is close to meaningless, e.g. the same scan is 8x
-on a workstation and 0.9x on a field laptop. Two times are kept and the gap between them is
-the answer to "why is this slower than the sum of its parts" — `wall_sec` includes decoding,
-thumbnails and writing  while `scan_sec` is the algorithm alone. 
+on a workstation and 0.9x on a field laptop. The worker count is recorded beside the machine for
+the same reason and matters more: one flag makes the same machine sixteen times faster. Two times
+are kept and the gap between them is the answer to "why is this slower than the sum of its
+parts" — `wall_sec` includes decoding, thumbnails and writing while `scan_sec` is the algorithm
+alone. On a `--parallel` run `scan_sec` is the larger of the two, because it sums time several
+workers spent at once, and dividing it by `wall_sec` says how much of the pool was working.
 
 ## Notes
 
 **Sample rate.** Recordings are read at their native rate. 
 
-**Memory.** One recording is resident at a time, so a 10,000-file corpus costs what its largest
-single recording costs. A long recording at a fine grid is the case to watch: the CLI prints the
-grid size before starting and suggests raising the hop size, `--hop` ,when it is ltoo arge.
+**Memory.** One recording is resident at a time per worker, so a 10,000-file corpus costs what
+its largest single recording costs — times `--parallel`. A long recording at a fine grid is the
+case to watch: the CLI prints the grid size before starting and suggests raising the hop size,
+`--hop` ,when it is ltoo arge.
 
 **The algorithms are closed source.** They download as obfuscated bundles and this package never
 sees inside them. That is a deterrent paired with your licence terms, not a 

@@ -5,9 +5,11 @@ This is the middle of the CLI — everything above it is argument parsing and ev
 one of the modules it calls. It exists as its own module so the loop can be tested without a
 terminal, and so the two hard-won rules about running over a big corpus live in one place:
 
-* **One recording resident at a time.** The signal, its magnitude grid and its boxes are all
-  released before the next file is opened. A ten-thousand-file survey costs the same memory as
-  its largest single recording, and the run manifest is the only thing that grows.
+* **One recording resident at a time, per worker.** The signal, its magnitude grid and its boxes
+  are all released before the next file is opened. A ten-thousand-file survey costs the same
+  memory as its largest single recording — times the number of workers, which is why
+  ``--parallel`` sizes its pool against the biggest header in the corpus — and the run manifest
+  is the only thing that grows.
 * **A bad file is a row in the manifest, not the end of the run.** Corrupt headers, truncated
   WAVs, permissions, a recording shorter than one FFT window — every one of them is an outcome
   recorded against that file. Four hours into a scan is the wrong moment to discover that the
@@ -28,7 +30,8 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Iterator
 
 from siarapp.dsp.stft import frame_count, grid_bytes, stft
 from siarapp.grid import FrameGrid, ScannerError, run_scan
@@ -36,9 +39,18 @@ from siarapp.io.audio import Recording, find_recordings, load_mono, probe
 from siarapp.io.output import OutputFolder, sidecar_document
 from siarapp.io.output import DEFAULT_FAMILY
 from siarapp.io.performance import performance_document, progress_block
+from siarapp.parallel import AlgorithmSpec, peak_worker_bytes, resolve_workers, scan_parallel
 from siarapp.viz.thumbnail import thumbnail_png
 
-__all__ = ["DEFAULT_FFT", "FileResult", "RunOptions", "plan_grid", "run_folder", "scan_one"]
+__all__ = [
+    "DEFAULT_FFT",
+    "FileResult",
+    "RunOptions",
+    "plan_grid",
+    "run_folder",
+    "scan_file",
+    "scan_one",
+]
 
 #: Grid used when neither the algorithm nor the user has an opinion. The web app's own default,
 #: which is what a box's coordinates were tuned against.
@@ -55,6 +67,14 @@ _LARGE_GRID_BYTES = 2 * 1024**3
 #: Shortest gap between two rewrites of the root documents. Freshness past this is wasted: the
 #: web app reads the folder when someone drops it in, not continuously.
 _MIN_FLUSH_SEC = 2.0
+
+#: Corpus size at which reading the headers moves onto threads. Below it the pool costs more to
+#: start than the probes cost to run.
+_PROBE_THREAD_FLOOR = 64
+
+#: Threads used for that. Small on purpose: this is queue depth for a disk, not compute, and a
+#: hundred threads on a spinning survey drive is slower than eight.
+_PROBE_THREADS = 8
 
 #: The rewrite may cost at most one part in this of the run's wall time. Both root documents
 #: carry a row per recording, so they grow with the corpus and a fixed interval that is free at
@@ -77,10 +97,13 @@ class RunOptions:
         thumbnails: Write lane thumbnails.
         limit: Stop after this many recordings (a dry run over a big corpus).
         recursive: Descend into subfolders.
+        workers: Recordings to scan at once. ``1`` runs everything in this process, which is the
+            default and the only behaviour that existed before ``--parallel``; ``0`` means as
+            many as the machine can use (see :func:`siarapp.parallel.resolve_workers`).
     """
 
     __slots__ = ("fft", "hop", "window", "channel", "params", "link", "resume",
-                 "thumbnails", "limit", "recursive")
+                 "thumbnails", "limit", "recursive", "workers")
 
     def __init__(
         self,
@@ -95,6 +118,7 @@ class RunOptions:
         thumbnails: bool = True,
         limit: int | None = None,
         recursive: bool = True,
+        workers: int = 1,
     ) -> None:
         self.fft = fft
         self.hop = hop
@@ -106,6 +130,7 @@ class RunOptions:
         self.thumbnails = thumbnails
         self.limit = limit
         self.recursive = recursive
+        self.workers = int(workers)
 
 
 class FileResult:
@@ -119,12 +144,17 @@ class FileResult:
         elapsed_sec: Wall time spent on it.
         shapes: Per-shape counts.
         error: The message, when ``status == "error"``.
+        lane: Which worker slot scanned it, for the live display. Always ``0`` on a serial run,
+            and deliberately not written to the manifest: it says which of several identical
+            processes happened to take the file, which is true of this run and of nothing else.
     """
 
-    __slots__ = ("rel_path", "status", "count", "duration_sec", "elapsed_sec", "shapes", "error")
+    __slots__ = ("rel_path", "status", "count", "duration_sec", "elapsed_sec", "shapes", "error",
+                 "lane")
 
     def __init__(self, rel_path: str, status: str, *, count: int = 0, duration_sec: float = 0.0,
-                 elapsed_sec: float = 0.0, shapes: dict | None = None, error: str = ""):
+                 elapsed_sec: float = 0.0, shapes: dict | None = None, error: str = "",
+                 lane: int = 0):
         self.rel_path = rel_path
         self.status = status
         self.count = count
@@ -132,6 +162,7 @@ class FileResult:
         self.elapsed_sec = elapsed_sec
         self.shapes = shapes or {}
         self.error = error
+        self.lane = lane
 
     def to_dict(self) -> dict:
         """The manifest row for this recording."""
@@ -222,7 +253,9 @@ def run_folder(
     options: RunOptions | None = None,
     *,
     progress: Callable[[int, int, FileResult], None] | None = None,
-    on_start: Callable[[int, int, str, float], None] | None = None,
+    on_start: Callable[[int, int, str, float, int], None] | None = None,
+    on_corpus: Callable[[int, float, int], None] | None = None,
+    on_idle: Callable[[int], None] | None = None,
     warn: Callable[[str], None] | None = None,
 ) -> dict:
     """Scan every recording under ``source_root`` and build the output folder.
@@ -233,12 +266,18 @@ def run_folder(
         out_root: Where to write the output folder.
         options: See :class:`RunOptions`.
         progress: Called ``(done, total, result)`` after each recording.
-        on_start: Called ``(index, total, rel_path, duration_sec)`` *before* each recording is
-            decoded. The pair exists because one recording is not a quick step: nearly all of
+        on_start: Called ``(index, total, rel_path, duration_sec, lane)`` *before* each recording
+            is decoded. The pair exists because one recording is not a quick step: nearly all of
             its time is spent inside the algorithm's ``scan``, which is a single opaque call,
             so a caller told only about completions has nothing to say for the whole of it.
             ``duration_sec`` comes from the header probe already done above, and is ``0.0``
-            for a file whose header would not read.
+            for a file whose header would not read. ``lane`` is the worker slot it went to,
+            always ``0`` on a serial run.
+        on_corpus: Called once, ``(files, audio_sec, workers)``, after the headers have been read
+            and the pool sized — everything a display needs to draw a total before the first
+            recording is opened.
+        on_idle: Called ``(lane)`` when a worker slot runs out of work, at the tail of a parallel
+            run.
         warn: Called with one-line warnings (mixed sample rates, oversized grids).
 
     Returns:
@@ -248,6 +287,7 @@ def run_folder(
         FileNotFoundError: If ``source_root`` holds no recordings at all — almost always a typo
             or a folder of MP3s, and silently producing an empty output folder helps nobody.
         ValueError: If the requested grid is invalid.
+        ScannerError: If the algorithm rejects the parameters, or a worker process dies.
     """
     options = options or RunOptions()
     warn = warn or (lambda _msg: None)
@@ -269,8 +309,16 @@ def run_folder(
         except Exception as e:  # noqa: BLE001 - a closed algorithm's own validation
             raise ScannerError(f"algorithm rejected --param: {e}") from e
 
-    durations = _probe_corpus(files, plan, warn)
+    infos = _probe_corpus(files, plan, warn)
+    durations = [i.duration_sec if i is not None else 0.0 for i in infos]
     audio_total = sum(durations)
+
+    workers = 1
+    if options.workers != 1:
+        workers = resolve_workers(options.workers, len(files), peak_worker_bytes(infos, plan),
+                                  warn)
+    if on_corpus is not None:
+        on_corpus(len(files), audio_total, workers)
 
     out = OutputFolder(out_root, source_root, link=options.link)
     started = time.time()
@@ -279,15 +327,20 @@ def run_folder(
     worked = 0
     next_flush_at = 0.0
 
-    for i, path in enumerate(files, start=1):
-        if on_start is not None:
-            on_start(i, len(files), out.rel_path(path), durations[i - 1])
-        result = _run_one_file(handle, path, out, plan, options)
+    if workers > 1:
+        stream = scan_parallel(
+            AlgorithmSpec.of(handle, options.params), files, out, plan, options, durations,
+            workers, on_start=on_start, on_idle=on_idle,
+        )
+    else:
+        stream = _scan_serially(handle, files, out, plan, options, durations, on_start)
+
+    for i, (index, result) in enumerate(stream, start=1):
         results.append(result)
-        audio_done += durations[i - 1]
+        audio_done += durations[index]
         if result.status != "skipped":
             worked += 1
-            audio_worked += durations[i - 1]
+            audio_worked += durations[index]
         # Flushed before the caller is told, not after: `progress` is how anything outside this
         # loop learns a recording is finished, and whatever it does about that — print a line,
         # or go and read the folder — should not race the write that makes it true.
@@ -296,7 +349,7 @@ def run_folder(
         # anything in it to open rather than two seconds later.
         if time.time() >= next_flush_at:
             cost = _write_state(
-                out, handle, source_root, plan, options, results, started,
+                out, handle, source_root, plan, options, results, started, workers,
                 progress_block(
                     started=started,
                     files_total=len(files),
@@ -316,7 +369,7 @@ def run_folder(
     # finished. Everything before it is stamped "running", which is exactly what an interrupted
     # scan should leave behind.
     manifest, _cost = _write_state(
-        out, handle, source_root, plan, options, results, started,
+        out, handle, source_root, plan, options, results, started, workers,
         progress_block(
             started=started,
             files_total=len(files),
@@ -331,6 +384,28 @@ def run_folder(
     return manifest
 
 
+def _scan_serially(
+    handle: Any,
+    files: list[str],
+    out: OutputFolder,
+    plan: dict,
+    options: RunOptions,
+    durations: list[float],
+    on_start: Callable[[int, int, str, float, int], None] | None,
+) -> Iterator[tuple]:
+    """Scan every file in this process, yielding ``(index, FileResult)`` in folder order.
+
+    The other half of the pair :func:`siarapp.parallel.scan_parallel` completes, and the reason
+    the run loop has no idea which of the two it is consuming: one process or eight, the loop
+    above sees the same stream of finished recordings and writes the same two documents.
+    """
+    total = len(files)
+    for index, path in enumerate(files):
+        if on_start is not None:
+            on_start(index + 1, total, out.rel_path(path), durations[index], 0)
+        yield index, scan_file(handle, path, out, plan, options)
+
+
 def _write_state(
     out: OutputFolder,
     handle: Any,
@@ -339,6 +414,7 @@ def _write_state(
     options: RunOptions,
     results: list[FileResult],
     started: float,
+    workers: int,
     progress: dict,
 ) -> tuple[dict, float]:
     """Rewrite both root documents from the results so far.
@@ -350,7 +426,8 @@ def _write_state(
         ``(manifest, seconds_the_write_cost)``. The cost is what paces the next flush.
     """
     at = time.time()
-    manifest = _build_manifest(handle, source_root, plan, options, results, started, progress)
+    manifest = _build_manifest(handle, source_root, plan, options, results, started, workers,
+                               progress)
     out.write_manifest(manifest)
     # Written even when nothing was scanned: "this run did nothing, and took four minutes to
     # decide that" is a performance answer too, and the panel that reads it should not have to
@@ -362,19 +439,25 @@ def _write_state(
         started=started,
         results=results,
         stft=plan,
+        workers=workers,
         progress=progress,
     ))
     return manifest, time.time() - at
 
 
-def _run_one_file(
+def scan_file(
     handle: Any,
     path: str,
     out: OutputFolder,
     plan: dict,
     options: RunOptions,
 ) -> FileResult:
-    """Decode, scan and write one recording. Never raises for a per-file problem."""
+    """Decode, scan and write one recording. Never raises for a per-file problem.
+
+    Public because a worker process calls it directly (:mod:`siarapp.parallel`), and it is the
+    whole of what a worker does: everything it touches is either read-only or this recording's
+    own output paths, which is what makes running several at once safe.
+    """
     rel = out.rel_path(path)
     if options.resume and out.already_done(path):
         return FileResult(rel, "skipped")
@@ -438,23 +521,33 @@ def _shape_counts(regions: list[dict]) -> dict:
     return dict(sorted(counts.items()))
 
 
-def _probe_corpus(files: list[str], plan: dict, warn: Callable[[str], None]) -> list[float]:
-    """Read every header once, warn about what they say, and return the durations.
+def _probe_corpus(files: list[str], plan: dict, warn: Callable[[str], None]) -> list:
+    """Read every header once, warn about what they say, and return what they said.
 
-    One pass for two jobs. The warnings are header-only checks worth making before spending
-    hours — probing ten thousand files costs about a second, and both mixed sample rates and an
-    oversized grid are the kind of problem that is obvious in advance and baffling afterwards.
-    The durations are what the progress estimate is built on, and asking the same headers twice
-    for them would double the only part of a run that happens before anything appears on screen.
+    One pass for three jobs. The warnings are header-only checks worth making before spending
+    hours — both mixed sample rates and an oversized grid are the kind of problem that is obvious
+    in advance and baffling afterwards. The durations drive the progress estimate. The frame
+    counts size the worker pool. Asking the same headers again for any of the three would double
+    the only part of a run that happens before anything appears on screen.
+
+    Read on a few threads above :data:`_PROBE_THREAD_FLOOR` files, because a probe is one seek and
+    one small read: it is latency, not work, and a three-week stream split into ten-minute files
+    is a hundred thousand of them. The threads only wait on the filesystem — ``soundfile`` drops
+    the GIL for the read — so this is not the parallelism ``--parallel`` provides and does not
+    interact with it.
 
     Returns:
-        One duration in seconds per file, in the order given. ``0.0`` for a header that could
-        not be read — that file is an error row later, and guessing a length for it would put
-        time into the estimate that will never be spent.
+        One :class:`~siarapp.io.audio.AudioInfo` per file, in the order given, or ``None`` where
+        the header could not be read — that file is an error row later, and inventing a length
+        for it would put time into the estimate that will never be spent.
     """
-    infos = [probe(p) for p in files]
+    if len(files) >= _PROBE_THREAD_FLOOR:
+        with ThreadPoolExecutor(max_workers=_PROBE_THREADS) as pool:
+            infos = list(pool.map(probe, files))
+    else:
+        infos = [probe(p) for p in files]
     _warn_about_corpus(infos, plan, warn)
-    return [i.duration_sec if i is not None else 0.0 for i in infos]
+    return infos
 
 
 def _warn_about_corpus(infos: list, plan: dict, warn: Callable[[str], None]) -> None:
@@ -503,6 +596,7 @@ def _build_manifest(
     options: RunOptions,
     results: list[FileResult],
     started: float,
+    workers: int = 1,
     progress: dict | None = None,
 ) -> dict:
     """Assemble ``siar-app-run.json`` from the per-file results so far.
@@ -528,6 +622,10 @@ def _build_manifest(
         "channel": options.channel,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
         "elapsed_sec": round(time.time() - started, 2),
+        # How many recordings were in flight at once. A wall-clock time means something quite
+        # different at 16 than at 1, and a manifest that does not say which is not comparable
+        # with the next one.
+        "workers": int(workers),
         "progress": progress or {},
         "files": len(results),
         "by_status": by_status,
