@@ -245,6 +245,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "every core this machine's memory will hold")
     out.add_argument("--no-recursive", action="store_true",
                      help="only the top level of the folder")
+    out.add_argument("--tui", action="store_true",
+                     help="draw the whole run in one live panel: progress, where the time is "
+                          "going, what is being found, and a row per worker")
     out.add_argument("--quiet", "-q", action="store_true", help="no per-file progress")
 
     p_runs = sub.add_parser("runs", help="list the scans run from this machine")

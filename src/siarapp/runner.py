@@ -38,7 +38,7 @@ from siarapp.grid import FrameGrid, ScannerError, run_scan
 from siarapp.io.audio import Recording, find_recordings, load_mono, probe
 from siarapp.io.output import OutputFolder, sidecar_document
 from siarapp.io.output import DEFAULT_FAMILY
-from siarapp.io.performance import performance_document, progress_block
+from siarapp.io.performance import performance_document, phase_totals, progress_block
 from siarapp.parallel import AlgorithmSpec, peak_worker_bytes, resolve_workers, scan_parallel
 from siarapp.viz.thumbnail import thumbnail_png
 
@@ -144,17 +144,20 @@ class FileResult:
         elapsed_sec: Wall time spent on it.
         shapes: Per-shape counts.
         error: The message, when ``status == "error"``.
+        phases: Seconds spent in each of :data:`PHASES` that this file reached. Partial on an
+            error — a file that failed to decode has a ``decode`` time and nothing else, which is
+            itself the diagnosis.
         lane: Which worker slot scanned it, for the live display. Always ``0`` on a serial run,
             and deliberately not written to the manifest: it says which of several identical
             processes happened to take the file, which is true of this run and of nothing else.
     """
 
     __slots__ = ("rel_path", "status", "count", "duration_sec", "elapsed_sec", "shapes", "error",
-                 "lane")
+                 "phases", "lane")
 
     def __init__(self, rel_path: str, status: str, *, count: int = 0, duration_sec: float = 0.0,
                  elapsed_sec: float = 0.0, shapes: dict | None = None, error: str = "",
-                 lane: int = 0):
+                 phases: dict | None = None, lane: int = 0):
         self.rel_path = rel_path
         self.status = status
         self.count = count
@@ -162,6 +165,7 @@ class FileResult:
         self.elapsed_sec = elapsed_sec
         self.shapes = shapes or {}
         self.error = error
+        self.phases = dict(phases or {})
         self.lane = lane
 
     def to_dict(self) -> dict:
@@ -214,6 +218,7 @@ def scan_one(
     algorithm: Any,
     recording: Recording,
     plan: dict,
+    phases: dict | None = None,
 ) -> tuple[list[dict], FrameGrid]:
     """Transform one decoded recording and scan it.
 
@@ -221,11 +226,15 @@ def scan_one(
         algorithm: The loaded algorithm.
         recording: The decoded mono recording.
         plan: The grid from :func:`plan_grid`.
+        phases: Optional dict to record timings into, as ``fft`` and ``scan`` seconds. Written
+            into rather than returned so the two callers that want a breakdown can have one
+            without changing what this returns for the ones that do not.
 
     Returns:
         ``(regions, grid)``. An empty region list and a zero-frame grid when the recording is
         shorter than one analysis window.
     """
+    at = time.time()
     result = stft(
         recording.samples,
         fft_size=plan["fft"],
@@ -241,9 +250,15 @@ def scan_one(
         result.hop_size,
         result.window_name,
     )
+    if phases is not None:
+        phases["fft"] = time.time() - at
     if grid.frames == 0:
         return [], grid
-    return run_scan(algorithm, grid), grid
+    at = time.time()
+    regions = run_scan(algorithm, grid)
+    if phases is not None:
+        phases["scan"] = time.time() - at
+    return regions, grid
 
 
 def run_folder(
@@ -463,19 +478,25 @@ def scan_file(
         return FileResult(rel, "skipped")
 
     started = time.time()
+    # Filled stage by stage, so whatever this file reached before it failed is still reported. The
+    # phases are the only view into where a slow run's time actually goes; see :data:`PHASES`.
+    phases: dict[str, float] = {}
     try:
         recording = load_mono(path, channel=options.channel)
     except OSError as e:
-        return FileResult(rel, "error", elapsed_sec=time.time() - started, error=str(e))
+        return FileResult(rel, "error", elapsed_sec=time.time() - started, error=str(e),
+                          phases={"decode": time.time() - started})
+    phases["decode"] = time.time() - started
 
     try:
-        regions, grid = scan_one(handle.algorithm, recording, plan)
+        regions, grid = scan_one(handle.algorithm, recording, plan, phases)
     except ScannerError as e:
         return FileResult(rel, "error", duration_sec=recording.duration_sec,
-                          elapsed_sec=time.time() - started, error=str(e))
+                          elapsed_sec=time.time() - started, error=str(e), phases=phases)
 
     status = "scanned" if grid.frames else "too_short"
 
+    at = time.time()
     try:
         out.place_audio(path)
         out.write_sidecar(path, sidecar_document(
@@ -494,13 +515,17 @@ def scan_file(
             structures=regions,
             source_path=path,
         ))
+        phases["write"] = time.time() - at
         if options.thumbnails:
+            at = time.time()
             out.write_thumbnail(path, thumbnail_png(recording.samples))
+            phases["thumbnail"] = time.time() - at
     except OSError as e:
+        phases.setdefault("write", time.time() - at)
         return FileResult(rel, "error", count=len(regions),
                           duration_sec=recording.duration_sec,
                           elapsed_sec=time.time() - started,
-                          error=f"could not write output: {e}")
+                          error=f"could not write output: {e}", phases=phases)
 
     return FileResult(
         rel,
@@ -509,6 +534,7 @@ def scan_file(
         duration_sec=recording.duration_sec,
         elapsed_sec=time.time() - started,
         shapes=_shape_counts(regions),
+        phases=phases,
     )
 
 
@@ -632,5 +658,9 @@ def _build_manifest(
         "structures": sum(r.count for r in results),
         "shapes": dict(sorted(total_shapes.items())),
         "audio_sec": round(sum(r.duration_sec for r in results), 2),
+        # Totals only. Where the time went is a performance answer and the per-file detail belongs
+        # in siar-app-performance.json — but the closing summary is printed from this document, so
+        # the five sums come along rather than making the CLI open the other file to read them.
+        "phases": phase_totals(results),
         "manifest": [r.to_dict() for r in results],
     }

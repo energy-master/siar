@@ -17,6 +17,11 @@ minutes. Above 1 is faster than realtime. It is computed from audio actually *sc
 from the folder's total duration — a run that skipped half its files on ``--resume`` did not
 process that audio and must not take credit for it.
 
+**Where the time went is the follow-up question**, and :data:`PHASES` is the answer: decode, fft,
+scan, write, thumbnail, timed separately per recording and summed for the run. One number for a
+slow scan says only that it was slow; five say whether the cure is a faster disk, a coarser grid,
+more cores, or dropping the thumbnails.
+
 The document is rewritten as the run goes, not once at the end, and :func:`progress_block` is
 what makes a half-written one readable: it says how far through the corpus the run is and when
 it expects to finish, so a folder dropped into the web app mid-run renders a live report rather
@@ -26,16 +31,35 @@ from __future__ import annotations
 
 import os
 import platform
-import sys
 import time
 
 __all__ = [
     "PERFORMANCE_NAME",
     "PERFORMANCE_FORMAT",
+    "PHASES",
     "performance_document",
+    "phase_totals",
     "progress_block",
     "realtime_factor",
 ]
+
+#: The stages of one recording, in the order they happen, and the order every reader lists them.
+#:
+#: They are timed separately because they answer different questions and have different cures. A
+#: run that is mostly ``decode`` is waiting on a disk, and a faster algorithm will not help it; one
+#: that is mostly ``fft`` should raise ``--hop``; one that is mostly ``scan`` is spending its time
+#: where it should be, and the only lever left is ``--parallel``; one that is mostly ``thumbnail``
+#: can pass ``--no-thumbnails`` and get that time back. Without the split, all five look the same
+#: from outside: "slow".
+#:
+#: ``write`` is the audio copy and the sidecar — the two files ``--resume`` looks for — and
+#: ``thumbnail`` follows it, because that is the order :func:`siarapp.runner.scan_file` writes them
+#: in and a reader comparing this list to the code should not have to wonder which.
+#:
+#: Named here rather than in :mod:`siarapp.runner`, which measures them: this is the module that
+#: defines what a run's cost *is*, and it is imported by the runner rather than the other way
+#: round.
+PHASES = ("decode", "fft", "scan", "write", "thumbnail")
 
 #: Written at the root of every output folder.
 PERFORMANCE_NAME = "siar-app-performance.json"
@@ -150,6 +174,31 @@ def _stamp(when: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
 
 
+def phase_totals(results) -> dict:
+    """Sum each of :data:`PHASES` across the recordings handled so far.
+
+    Args:
+        results: The ``FileResult`` objects, each carrying its own ``phases``.
+
+    Returns:
+        ``{phase: seconds}`` in :data:`PHASES` order, carrying only phases that took time — a run
+        with ``--no-thumbnails`` has no ``thumbnail`` key rather than a zero, so a reader can tell
+        "never done" from "free".
+
+        On a ``--parallel`` run these are worker seconds and their sum exceeds the wall clock,
+        because several workers spent them at once. Every reader that prints them says which it is
+        showing.
+    """
+    totals = {name: 0.0 for name in PHASES}
+    for r in results:
+        for name, seconds in getattr(r, "phases", {}).items():
+            totals[name] = totals.get(name, 0.0) + float(seconds)
+    # Tenths of a millisecond, one digit finer than the rest of this document, because a stage can
+    # legitimately be that quick — writing one sidecar — and a key present with a value of 0.0
+    # would contradict the rule that a key present means a stage that ran.
+    return {name: round(seconds, 4) for name, seconds in totals.items() if seconds > 0}
+
+
 def performance_document(
     *,
     algorithm: str,
@@ -193,6 +242,9 @@ def performance_document(
             # is invisible in an average and obvious in a sorted column.
             "realtime_factor": realtime_factor(r.duration_sec, r.elapsed_sec),
             "count": r.count,
+            # Where this file's time went. Absent phases mean not reached, not free: a row with a
+            # `decode` time and nothing else is a file that never got as far as the transform.
+            "phases": {name: round(float(sec), 4) for name, sec in r.phases.items()},
         }
         for r in results
     ]
@@ -225,6 +277,9 @@ def performance_document(
             "scan_realtime_factor": realtime_factor(audio_sec, scan_sec),
             "sec_per_file": round(wall / len(results), 3) if results else 0.0,
             "throughput_audio_hours_per_hour": realtime_factor(audio_sec, wall),
+            # Where the time went, by stage. `scan_sec` above is the same measurement collapsed to
+            # one number; this is the version that says which lever to reach for.
+            "phases": phase_totals(results),
         },
         "files": files,
     }

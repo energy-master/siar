@@ -59,7 +59,7 @@ The first command you run shows the MIT licence and asks you to accept it. See
 [Licence](#licence). Run the commands below to get started.
 
 ```bash
-siar-app quick-start      # the illustrated walkthrough, thirteen steps
+siar-app quick-start      # the illustrated walkthrough, fifteen steps
 siar-app readme           # this manual
 ```
 
@@ -191,13 +191,19 @@ scanning   /home/you/survey-audio
 output     /home/you/survey-scan
 [412/412] station-c/2025-09-08T1400.wav: 37 structures
 
-METRIC            VALUE
--------------  --------
+METRIC            VALUE  SHARE
+-------------  --------  -----
 recordings          412
 scanned             411
 errors                1
 audio scanned   27.40 h
 wall time      30.7 min
+  decode        2.1 min     7%
+  fft           8.0 min    26%
+  scan         17.6 min    57%
+  write            24 s     1%
+  thumbnail     1.9 min     6%
+  overhead         41 s     2%
 realtime          53.6x
 workers               1
 structures        9,043
@@ -217,8 +223,23 @@ Open it in IDent Dynamics (Open folder) to see the boxes on the spectrogram.
 `realtime` is the row to plan with: 53.6x means the scan ran 53.6 times faster than the audio it
 scanned, so an hour of recording cost about a minute. It counts only audio this run actually
 scanned, so a `--resume` run is rated on the work it did rather than on the files it skipped, and
-on `--parallel` a second row gives the same figure per worker. The same numbers, per file, are in
-`siar-app-performance.json` at the root of the output folder.
+on `--parallel` a second row gives the same figure per worker.
+
+The rows indented under `wall time` say where that time went, and each has a different cure:
+
+| Stage | What it is | If it dominates |
+|---|---|---|
+| `decode` | Reading and mixing the audio | The disk is the limit — a faster one, or fewer channels |
+| `fft` | Building the Fourier grid | Raise `--hop`, or lower `--fft` |
+| `scan` | The algorithm itself | Where the time should go. `--parallel` is the only lever left |
+| `write` | Copying the audio and writing the sidecar | Try `--link` |
+| `thumbnail` | The 200x64 lane preview | `--no-thumbnails` gives it back |
+| `overhead` | Header probing, manifest rewrites, pool startup | Rarely worth chasing |
+
+On a `--parallel` run those stages were spent by several workers at once, so they are totalled
+under `worker time` — their own heading — and add up to more than the wall clock, which is the
+point of running them at once. The same numbers, per file, are in `siar-app-performance.json` at
+the root of the output folder.
 
 The first run downloads the algorithm and caches it under `~/.siar-app/algorithms/`. Every
 run after that is completely offline — useful on a vessel, required in a lab with no network.
@@ -228,6 +249,7 @@ Useful flags:
 | Flag | Why |
 |---|---|
 | `--parallel` | Scan several recordings at once, one process per core. The single biggest lever on a large corpus. |
+| `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. |
 | `--resume` | Carry on where an interrupted run stopped. Safe to pass always. |
 | `--limit 20` | Trial the algorithm on twenty files before committing to a corpus. |
 | `--link` | Hardlink the audio into the output folder instead of copying it. Same filesystem only; falls back to a copy. |
@@ -272,6 +294,46 @@ Two things to know before turning it up:
 * **The manifest lists recordings in the order they finished**, which on a parallel run is not
   folder order — a ten-second clip submitted after a forty-minute drift recording is written
   first. Nothing reads the manifest in order; the sidecars are what the app pairs to lanes.
+
+### Watching a long run: `--tui`
+
+`--tui` replaces the per-file lines with one panel, redrawn in place, holding everything worth
+knowing while a survey is still going:
+
+```bash
+siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --parallel --tui
+```
+
+```
+╭─ all_structures · 12 workers ─────────────────────────────────── 5:24:11 elapsed ─╮
+│ ████████████████░░░░░░░░░░░░░░░░░  48%  12043/25318 files  201.4 h of 418.2 h     │
+│ 38.1x realtime  ·  5:41:03 left  ·  91,043 structures  ·  3 errors                │
+├─ time by stage ─────────────────────────┬─ structures found ──────────────────────┤
+│ scan         48.90 h  ██████████  91%   │ click        41,882  ██████████         │
+│ fft           2.71 h  █·········   5%   │ tonal        39,014  █████████·         │
+│ thumbnail     1.09 h  ··········   2%   │ patch         6,131  █·········         │
+│ decode        0.85 h  ··········   2%   │ sweep         2,194  ··········         │
+│ write         0.16 h  ··········   0%   │ click_train   1,822  ··········         │
+├─ workers ─────────────────────────────────────────────────────────────────────────┤
+│   1  ████████░░░░  61%    38s  station-a/2026-07-03/0410.wav                      │
+│   2  ██░░░░░░░░░░  17%    11s  station-a/2026-07-03/0420.wav                      │
+│   3  ············   idle                                                          │
+├─ problems ────────────────────────────────────────────────────────────────────────┤
+│ ! station-b/2026-06-28/1130.wav: could not decode: Format not recognised.         │
+├─ just finished ───────────────────────────────────────────────────────────────────┤
+│ ✓ station-a/2026-07-03/0400.wav                             37 structures         │
+│ ✓ station-c/2026-07-02/2350.wav                             12 structures         │
+╰───────────────────────────────────────────────────────────────────────────────────╯
+```
+
+The stage block is the reason to use it: it says an hour in whether the run is spending its time
+in the algorithm — where it should — or in the thumbnails, and both cures are one flag. Failures
+stay on screen instead of scrolling past, and are reprinted as ordinary lines when the panel comes
+down, so nothing is lost to a wiped frame.
+
+The panel is sized to the terminal on every redraw and sections are dropped from the bottom when
+it is too short, so a small window still shows the bar and the totals. It needs a terminal: piped
+into a log, `--tui` falls back to one line per recording and says so.
 
 ## 5. Open the result in IDent Dynamics
 
@@ -333,7 +395,7 @@ Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.3.0 · © Vixen Intelligence 2026
+siar-app 0.4.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
@@ -344,7 +406,7 @@ invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 
 ```bash
 $ siar-app version
-siar-app 0.3.0
+siar-app 0.4.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
@@ -367,7 +429,7 @@ See [Licence](#licence) below.
 
 ### `siar-app quick-start`
 
-Opens the illustrated quickstart in whatever browser this machine has — thirteen steps, from
+Opens the illustrated quickstart in whatever browser this machine has — fifteen steps, from
 installing `uv` through to rating an algorithm, each one a terminal window showing the real
 command and its real output.
 
@@ -577,6 +639,7 @@ else stays a string. An algorithm that wanted a float should not receive `"2.5"`
 | `--limit N` | stop after N recordings — a trial run over a big corpus |
 | `--parallel [N]` | scan N recordings at once, one process each; bare `--parallel` uses every core the machine's memory will hold |
 | `--no-recursive` | only the top level of the folder |
+| `--tui` | draw the whole run in one live panel — [see above](#watching-a-long-run---tui). Needs a terminal |
 | `--quiet`, `-q` | no per-file progress |
 
 The first run of an algorithm downloads it and displays a progress bar:

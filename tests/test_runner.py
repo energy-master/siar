@@ -268,6 +268,35 @@ def test_thumbnails_can_be_turned_off(corpus, stub, tmp_path):
     assert os.path.isfile(out / "loud.structures.json")
 
 
+def test_every_stage_of_a_recording_is_timed(corpus, stub, tmp_path):
+    """The phase breakdown, end to end: per file, in the totals, and in the run manifest.
+
+    It is the difference between "the run was slow" and "the run was waiting on the disk", so a
+    stage that quietly stops being measured is worth failing a test over.
+    """
+    out = tmp_path / "out"
+    manifest = run_folder(stub, str(corpus), str(out), RunOptions())
+    perf = json.loads((out / "siar-app-performance.json").read_text())
+
+    scanned = [f for f in perf["files"] if f["status"] == "scanned"]
+    assert scanned
+    for row in scanned:
+        assert set(row["phases"]) == {"decode", "fft", "scan", "write", "thumbnail"}
+        # Every stage of a file is part of that file's own wall time, with room for the rounding.
+        assert sum(row["phases"].values()) <= row["elapsed_sec"] + 0.01
+
+    assert perf["totals"]["phases"] == manifest["phases"]
+    assert manifest["phases"]["scan"] > 0
+    assert sum(manifest["phases"].values()) <= manifest["elapsed_sec"] + 0.01
+
+
+def test_a_stage_that_never_ran_is_absent_rather_than_zero(corpus, stub, tmp_path):
+    out = tmp_path / "out"
+    manifest = run_folder(stub, str(corpus), str(out), RunOptions(thumbnails=False))
+    assert "thumbnail" not in manifest["phases"]
+    assert "fft" in manifest["phases"]
+
+
 def test_the_folder_is_openable_before_the_run_finishes(corpus, stub, tmp_path):
     """The point of the whole flush loop: drop an overnight scan into the app while it runs.
 

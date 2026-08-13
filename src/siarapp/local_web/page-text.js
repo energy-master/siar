@@ -22,7 +22,7 @@ window.QUICKSTART_TEXT = `
 
 eyebrow: SIaR · Signal Information and Reconnaissance
 headline: Build datasets from your data. 
-intro: Thirteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
+intro: Fifteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
 prompt: user@vi:~$
 window: user@vi: ~
 railtitle: Steps
@@ -61,7 +61,7 @@ rail: Check the build platform tag
 note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
 term:
 $ siar-app version
-siar-app 0.3.0
+siar-app 0.4.0
 ! platform     linux-x86_64-cp313
 python       3.13.1
 licence      MIT (not yet accepted)
@@ -155,24 +155,24 @@ $ siar-app run ~/survey-audio --algorithm all_structures --out ~/survey-scan
 . output     /home/user/survey-scan
 [412/412] station-c/2025-09-08T1400.wav: 37 structures
 
-. METRIC            VALUE
-- -------------  --------
+. METRIC            VALUE  SHARE
+- -------------  --------  -----
 recordings          412
 . scanned             411
 . errors                1
 audio scanned   27.40 h
 wall time      30.7 min
+.   decode        2.1 min     7%
+.   fft           8.0 min    26%
+!   scan         17.6 min    57%
+.   write            24 s     1%
+.   thumbnail     1.9 min     6%
+.   overhead         41 s     2%
 ! realtime          53.6x
 . workers               1
 ! structures        9,043
 
-. STRUCTURE    FOUND
-- -----------  -----
-click        4,188
-click_train    122
-patch          613
-sweep          219
-tonal        3,901
+. # The rows under wall time say where it went: fft wants a bigger --hop, scan wants --parallel.
 
 --- slide ---
 title: Scan on every core
@@ -187,6 +187,27 @@ $ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paral
   3  ··············    —      idle
 
 . # Each worker holds one recording's grid: memory, not cores, is usually the limit.
+
+--- slide ---
+title: Watch a long run
+rail: Watch a long run
+note: ~--tui~ draws the **whole run in one panel**, redrawn in place: how far through it is, where the time is going, what it is finding, a row per worker, and any failures kept on screen rather than scrolling past. The stage block is the reason to use it — an hour in it says whether the time is going into the algorithm, where it should, or into the thumbnails.
+term:
+$ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --parallel --tui
+. ╭─ all_structures · 12 workers ──────────────────── 5:24:11 elapsed ─╮
+! │ ██████████████░░░░░░░░░░░░░░░  48%  12043/25318 files  201.4 h     │
+! │ 38.1x realtime  ·  5:41:03 left  ·  91,043 structures  ·  3 errors │
+. ├─ time by stage ──────────────┬─ structures found ──────────────────┤
+! │ scan     48.90 h ██████ 91%  │ click     41,882  ██████████        │
+. │ fft       2.71 h █·····  5%  │ tonal     39,014  █████████·        │
+. │ thumbnail 1.09 h ······  2%  │ patch      6,131  █·········        │
+. ├─ workers ──────────────────────────────────────────────────────────┤
+  │   1  ████████░░░░  61%   38s  station-a/2026-07-03/0410.wav        │
+  │   2  ██░░░░░░░░░░  17%   11s  station-a/2026-07-03/0420.wav        │
+. │   3  ············   idle                                           │
+. ╰────────────────────────────────────────────────────────────────────╯
+
+. # Needs a terminal. Piped into a log it falls back to one line per recording.
 
 --- slide ---
 title: Peek at the result
@@ -235,7 +256,7 @@ rail: Update / Delete application
 note: The token, licence, history and cached algorithms all survive an app upgrade.
 term:
 $ uv tool upgrade siar-app
-. Updated siar-app v0.2.0 -> v0.3.0
+. Updated siar-app v0.3.0 -> v0.4.0
 
 . # Installed from git, so uv compares version numbers. Same number, newer commit?
 $ uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git
