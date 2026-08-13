@@ -69,7 +69,7 @@ from siarapp.cli.format import (
     stage_tag,
     visible_len,
 )
-from siarapp.cli.progress import Throughput
+from siarapp.cli.progress import Passage, Throughput
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
 
 __all__ = ["TuiDisplay"]
@@ -148,7 +148,7 @@ class TuiDisplay:
 
         self._started = time.time()
         self._workers = max(1, workers)
-        self._lanes: list[tuple | None] = [None] * self._workers
+        self._lanes: list[Passage | None] = [None] * self._workers
         self._files_total = 0
         self._audio_total = 0.0
         self._files_done = 0
@@ -203,8 +203,7 @@ class TuiDisplay:
             self._files_total = max(self._files_total, total)
             self._planned[rel_path] = duration_sec
             self._ensure_lanes(lane)
-            now = time.time()
-            self._lanes[lane] = (index, rel_path, duration_sec, size_bytes, now, "", now)
+            self._lanes[lane] = Passage(index, rel_path, duration_sec, size_bytes, time.time())
 
     def on_idle(self, lane: int) -> None:
         """A worker has run out of work — the tail of the run."""
@@ -220,9 +219,8 @@ class TuiDisplay:
         """
         with self._lock:
             self._ensure_lanes(lane)
-            entry = self._lanes[lane]
-            if entry is not None:
-                self._lanes[lane] = entry[:5] + (stage, time.time())
+            if self._lanes[lane] is not None:
+                self._lanes[lane].advance(stage, time.time())
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into every counter the frame draws."""
@@ -383,16 +381,14 @@ class TuiDisplay:
         """
         return realtime_factor(self._lane_audio.get(lane, 0.0), self._lane_wall.get(lane, 0.0))
 
-    def _lane_fraction(self, entry: tuple | None, now: float) -> float:
+    def _lane_fraction(self, entry: Passage | None, now: float) -> float:
         """How far through its **current stage** one lane is, ``0.0`` when there is no telling.
 
         Per stage, and from zero at each of them. Nine tenths of a recording is the scan, so one
         bar spread over the whole file is full before the scan starts and then holds there for
         the hour that actually matters — a bar that is finished before the work begins.
         """
-        if entry is None:
-            return 0.0
-        return self._cost.stage_fraction(entry[5], entry[2], now - entry[6])
+        return 0.0 if entry is None else entry.fraction(self._cost, now)
 
     def _audio_in_flight(self, now: float) -> float:
         """Audio inside the workers right now, counted by how far through it each of them is.
@@ -406,7 +402,7 @@ class TuiDisplay:
         counts in full — the algorithm has seen every frame of it.
         """
         return sum(
-            self._cost.scanned_fraction(entry[5], entry[2], now - entry[6]) * entry[2]
+            entry.scanned(self._cost, now) * entry.seconds
             for entry in self._lanes if entry is not None
         )
 
@@ -681,10 +677,10 @@ class TuiDisplay:
             if entry is None:
                 lines.append(f"{label}{paint('·' * _LANE_BAR + '   idle', DIM)}")
                 continue
-            _index, rel_path, seconds, size_bytes, started_at, stage, _at = entry
-            spent = now - started_at
+            rel_path, seconds, size_bytes = entry.rel_path, entry.seconds, entry.size_bytes
+            spent = now - entry.started_at
             fraction = self._lane_fraction(entry, now)
-            if self._cost.stage_seconds(stage, seconds) > 0:
+            if entry.expected(self._cost) > 0:
                 filled = int(round(_LANE_BAR * fraction))
                 stat = (paint("█" * filled, GREEN) + paint("░" * (_LANE_BAR - filled), DIM)
                         + f" {100.0 * fraction:3.0f}% {spent:5.0f}s")
@@ -694,7 +690,7 @@ class TuiDisplay:
                 stat = paint("░" * _LANE_BAR, DIM) + f"   —  {spent:5.0f}s"
             # This lane's own speed, beside this lane's own bar.
             stat += "  " + paint(f"{factor_text(self._lane_factor(lane)):>7}", CYAN)
-            stat += "  " + paint(stage_tag(stage), CYAN)
+            stat += "  " + paint(stage_tag(entry.stage), CYAN)
             room = inner - len(label) - visible_len(stat) - 2
             lines.append(f"{label}{stat}  {named_recording(rel_path, size_bytes, seconds, room)}")
         return lines

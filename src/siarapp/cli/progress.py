@@ -27,13 +27,29 @@ from __future__ import annotations
 
 from siarapp.io.performance import MAIN_PHASE, PHASES, TYPICAL_SHARES
 
-__all__ = ["Throughput"]
+__all__ = ["Passage", "Throughput"]
 
 #: No estimated bar is ever drawn full. A bar that reaches 100% and then keeps going has misled
 #: the reader twice; one that waits just short of it has only ever said "nearly", which is true.
 #: The same cap :data:`siarapp.cli.format.BAR_CAP` applies to what is printed, kept here as a
 #: fraction because this module is where the fraction is decided.
 _CAP = 0.99
+
+#: Where a stage's bar stands when it has taken exactly as long as it was expected to. The rest of
+#: the bar belongs to the overrun: past its estimate a stage keeps creeping towards :data:`_CAP`
+#: without ever reaching it, so a bad estimate reads as a bar that slows down rather than one that
+#: stops. A frozen bar and a hung run look identical, and only one of them is worth panicking over.
+_ON_TIME = 0.9
+
+#: Stages whose measured time may be used to size the ones after them.
+#:
+#: The transform and the scan both walk the same magnitude grid, so one predicts the other across
+#: any corpus, any sample rate and any machine: if the FFT on this recording took eight seconds,
+#: the scan will take roughly whatever multiple of eight the algorithm's split says. The stages
+#: left out are the ones that wait on a disk — reading the audio, copying it, writing a preview.
+#: How long those take says more about the page cache than about the work, and a recording read
+#: from cache in twenty milliseconds would predict a scan that finishes before it starts.
+_CALIBRATORS = ("fft", "scan")
 
 
 class Throughput:
@@ -85,32 +101,72 @@ class Throughput:
         """How a recording's time divides between the stages, as fractions summing to one."""
         return _normalised(self._phases) or self._prior_shares
 
-    def stage_seconds(self, stage: str, audio_sec: float) -> float:
-        """How long ``stage`` should take on a recording of this length. ``0.0`` if unknown."""
-        rate = self.cost_rate()
-        if rate <= 0 or audio_sec <= 0 or stage not in PHASES:
-            return 0.0
-        return audio_sec * rate * self.shares().get(stage, 0.0)
+    def stage_seconds(self, stage: str, audio_sec: float, spent: dict | None = None) -> float:
+        """How long ``stage`` should take on this recording. ``0.0`` when there is no telling.
 
-    def stage_fraction(self, stage: str, audio_sec: float, in_stage_sec: float) -> float:
+        Two ways of answering, and the first is far the better one:
+
+        * **From this recording's own completed stages.** Once ``fft`` has taken eight seconds on
+          this file, and the split says ``fft`` is a fifteenth of what ``scan`` is, ``scan`` is
+          about two minutes — and that holds whatever the sample rate, whatever the machine, and
+          whether or not this algorithm has ever run here before. It is the ratios between the
+          stages that are stable, not the seconds.
+        * **From what a second of audio cost last time**, for the stages that run before anything
+          has been measured — the first bar of the first recording, and nothing else.
+
+        Args:
+            stage: The stage to size.
+            audio_sec: The recording's length.
+            spent: Seconds this recording has already spent, by stage, from the stages it has
+                finished. This is what makes the estimate self-correcting: a seed that is ten
+                times out is corrected by the first stage that completes rather than being
+                believed for the whole file.
+
+        Returns:
+            Seconds, or ``0.0`` when neither route can answer.
+        """
+        if stage not in PHASES or audio_sec <= 0:
+            return 0.0
+        shares = self.shares()
+        share = shares.get(stage, 0.0)
+        if share <= 0:
+            return 0.0
+
+        usable = [k for k in (spent or {}) if k in _CALIBRATORS and shares.get(k, 0.0) > 0]
+        measured = sum(float(spent[k]) for k in usable)
+        weight = sum(shares[k] for k in usable)
+        if measured > 0 and weight > 0:
+            return share * measured / weight
+
+        rate = self.cost_rate()
+        return audio_sec * rate * share if rate > 0 else 0.0
+
+    def stage_fraction(self, stage: str, audio_sec: float, in_stage_sec: float,
+                       spent: dict | None = None) -> float:
         """How far through its current stage a lane is, ``0.0`` when there is no way to tell.
 
         Args:
             stage: The stage that lane is in, ``""`` before it has reported one.
             audio_sec: The recording's length.
             in_stage_sec: Wall time since that stage began.
+            spent: See :meth:`stage_seconds`.
 
         Returns:
-            ``0.0`` to :data:`_CAP`. A stage that overruns its estimate holds at the cap rather
-            than rolling over into the next one — the elapsed seconds beside the bar keep moving,
-            which says "longer than expected" without the bar having to lie about it.
+            ``0.0`` to :data:`_CAP`, reaching :data:`_ON_TIME` when the stage has taken exactly
+            as long as expected and creeping towards the cap after that. It never stops moving
+            and it never fills: an estimate that has been overtaken should say so by slowing
+            down, not by freezing, and not by claiming the work is done.
         """
-        expected = self.stage_seconds(stage, audio_sec)
+        expected = self.stage_seconds(stage, audio_sec, spent)
         if expected <= 0:
             return 0.0
-        return min(_CAP, max(0.0, in_stage_sec) / expected)
+        over = max(0.0, in_stage_sec) / expected
+        if over <= 1.0:
+            return _ON_TIME * over
+        return _CAP - (_CAP - _ON_TIME) / over
 
-    def scanned_fraction(self, stage: str, audio_sec: float, in_stage_sec: float) -> float:
+    def scanned_fraction(self, stage: str, audio_sec: float, in_stage_sec: float,
+                         spent: dict | None = None) -> float:
         """How much of a recording in flight to count as scanned, for the corpus bar.
 
         Nothing before the scan starts, the scan's own progress during it, and all of it
@@ -123,7 +179,58 @@ class Throughput:
             return 0.0
         if stage != MAIN_PHASE:
             return _CAP
-        return self.stage_fraction(stage, audio_sec, in_stage_sec)
+        return self.stage_fraction(stage, audio_sec, in_stage_sec, spent)
+
+
+class Passage:
+    """One recording's trip through one worker, as a display follows it.
+
+    Held from ``on_start`` to the result, and the reason a lane's bar can be right about a file
+    the run has never seen the like of: it remembers how long this recording's finished stages
+    actually took, which is what :meth:`Throughput.stage_seconds` calibrates the rest against.
+
+    Attributes:
+        index: Its position in the run, for the ``[7/412]`` counter.
+        rel_path: Path relative to the scanned folder.
+        seconds: Its length in audio.
+        size_bytes: What it occupies on disk.
+        started_at: When the worker took it.
+        stage: The stage it is in now, ``""`` before it has reported one.
+        stage_at: When that stage began — the bar starts again from here.
+        spent: Seconds each finished stage of this recording took.
+    """
+
+    __slots__ = ("index", "rel_path", "seconds", "size_bytes", "started_at", "stage",
+                 "stage_at", "spent")
+
+    def __init__(self, index: int, rel_path: str, seconds: float, size_bytes: int,
+                 at: float) -> None:
+        self.index = int(index)
+        self.rel_path = rel_path
+        self.seconds = float(seconds)
+        self.size_bytes = int(size_bytes)
+        self.started_at = self.stage_at = float(at)
+        self.stage = ""
+        self.spent: dict[str, float] = {}
+
+    def advance(self, stage: str, at: float) -> None:
+        """Move on to ``stage``, banking what the one before it cost."""
+        if self.stage:
+            self.spent[self.stage] = max(0.0, at - self.stage_at)
+        self.stage = stage
+        self.stage_at = float(at)
+
+    def fraction(self, cost: Throughput, now: float) -> float:
+        """How far through its current stage this recording is."""
+        return cost.stage_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+
+    def scanned(self, cost: Throughput, now: float) -> float:
+        """How much of it to count towards the corpus bar."""
+        return cost.scanned_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+
+    def expected(self, cost: Throughput) -> float:
+        """How long its current stage should take, ``0.0`` when there is no telling."""
+        return cost.stage_seconds(self.stage, self.seconds, self.spent)
 
 
 def _normalised(shares: dict | None) -> dict:

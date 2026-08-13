@@ -44,7 +44,7 @@ from siarapp.cli.format import (
     size_and_length,
     stage_tag,
 )
-from siarapp.cli.progress import Throughput
+from siarapp.cli.progress import Passage, Throughput
 from siarapp.cli.table import render_table, terminal_width
 from siarapp.cli.tui import TuiDisplay
 from siarapp.config import (
@@ -1018,10 +1018,8 @@ class ScanReporter:
         self._cost = throughput or Throughput()
         self._audio_sec = 0.0
         self._wall_sec = 0.0
-        self._current: tuple[int, int, str, float, int] | None = None
-        self._stage = ""
-        self._stage_at = 0.0
-        self._started_at = 0.0
+        self._total = 0
+        self._current: Passage | None = None
 
     # -- the callbacks run_folder wants ----------------------------------------------------
 
@@ -1034,8 +1032,8 @@ class ScanReporter:
     def on_stage(self, lane: int, stage: str) -> None:
         """The recording has moved on to another stage. One lane here, so ``lane`` is ignored."""
         with self._lock:
-            self._stage = stage
-            self._stage_at = time.time()
+            if self._current is not None:
+                self._current.advance(stage, time.time())
 
     def on_start(self, index: int, total: int, rel_path: str, duration_sec: float,
                  lane: int = 0, size_bytes: int = 0) -> None:
@@ -1043,9 +1041,8 @@ class ScanReporter:
         if not self._tty:
             return
         with self._lock:
-            self._current = (index, total, rel_path, duration_sec, size_bytes)
-            self._stage = ""
-            self._stage_at = self._started_at = time.time()
+            self._total = total
+            self._current = Passage(index, rel_path, duration_sec, size_bytes, time.time())
         if self._thread is None:
             self._stop.clear()
             self._thread = threading.Thread(target=self._tick, daemon=True)
@@ -1094,13 +1091,10 @@ class ScanReporter:
                 current = self._current
                 if current is None:
                     continue
-                now = time.time()
-                line = self._render(current, now - self._started_at, self._stage,
-                                    now - self._stage_at)
+                line = self._render(current, time.time())
                 print(f"\r\033[K{clip(line, terminal_width())}", end="", flush=True)
 
-    def _render(self, current: tuple[int, int, str, float, int], elapsed: float,
-                stage: str = "", in_stage: float = 0.0) -> str:
+    def _render(self, current: Passage, now: float) -> str:
         """The live line: which recording, how big it is, what is happening to it, how far in.
 
         The size and the length are the two facts that make a slow recording explicable rather
@@ -1113,20 +1107,21 @@ class ScanReporter:
         there for as long as the real work takes — which is precisely the interval it was meant
         to report on.
         """
-        index, total, rel_path, seconds, size_bytes = current
-        head = f"[{index}/{total}] {rel_path}"
-        if size_bytes or seconds > 0:
-            head += f"  {size_and_length(size_bytes, seconds)}"
-        head += f"  {stage_tag(stage)}"
+        elapsed = now - current.started_at
+        in_stage = now - current.stage_at
+        head = f"[{current.index}/{self._total}] {current.rel_path}"
+        if current.size_bytes or current.seconds > 0:
+            head += f"  {size_and_length(current.size_bytes, current.seconds)}"
+        head += f"  {stage_tag(current.stage)}"
 
-        expected = self._cost.stage_seconds(stage, seconds)
+        expected = current.expected(self._cost)
         if expected <= 0:
-            # A first run of this algorithm, before anything has finished: nothing is known about
-            # what a second of audio costs, and a bar drawn from nothing is invention. Elapsed
-            # alone, which at least says the run is alive.
+            # The first stage of the first recording of a first run: nothing measured on this file
+            # and nothing in the history, so there is nothing to draw a bar from. Elapsed alone,
+            # which at least says the run is alive — and one stage later there is an estimate.
             return f"{head} {elapsed:.0f}s"
 
-        fraction = self._cost.stage_fraction(stage, seconds, in_stage)
+        fraction = current.fraction(self._cost, now)
         filled = int(round(BAR_WIDTH * fraction))
         drawn = "█" * filled + "░" * (BAR_WIDTH - filled)
         return (f"{head} {drawn} {fraction * 100:2.0f}%  "
@@ -1174,7 +1169,7 @@ class WorkerPanel:
         # history and replaced by this run's own figures as soon as one recording lands.
         self._cost = throughput or Throughput()
         self._workers = 1
-        self._lanes: list[tuple | None] = []
+        self._lanes: list[Passage | None] = []
         # Per lane, so a worker that is slower than its neighbours is visible as a number and not
         # only as a bar that moves less.
         self._lane_audio: dict[int, float] = {}
@@ -1219,8 +1214,7 @@ class WorkerPanel:
         with self._lock:
             self._planned[rel_path] = duration_sec
             self._ensure_lanes(lane)
-            now = time.time()
-            self._lanes[lane] = (index, rel_path, duration_sec, size_bytes, now, "", now)
+            self._lanes[lane] = Passage(index, rel_path, duration_sec, size_bytes, time.time())
 
     def on_idle(self, lane: int) -> None:
         """A worker has run out of work — the tail of the run."""
@@ -1232,9 +1226,8 @@ class WorkerPanel:
         """A worker has moved on to another stage: this lane's bar starts again, from zero."""
         with self._lock:
             self._ensure_lanes(lane)
-            entry = self._lanes[lane]
-            if entry is not None:
-                self._lanes[lane] = entry[:5] + (stage, time.time())
+            if self._lanes[lane] is not None:
+                self._lanes[lane].advance(stage, time.time())
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into the totals."""
@@ -1323,11 +1316,9 @@ class WorkerPanel:
         audio, wall = self._lane_audio.get(lane, 0.0), self._lane_wall.get(lane, 0.0)
         return realtime_factor(audio, wall)
 
-    def _lane_fraction(self, entry: tuple | None, now: float) -> float:
+    def _lane_fraction(self, entry: Passage | None, now: float) -> float:
         """How far through its **current stage** one lane is, ``0.0`` when there is no telling."""
-        if entry is None:
-            return 0.0
-        return self._cost.stage_fraction(entry[5], entry[2], now - entry[6])
+        return 0.0 if entry is None else entry.fraction(self._cost, now)
 
     def _audio_in_flight(self, now: float) -> float:
         """Audio inside the workers right now, counted by how far each one's scan has got.
@@ -1339,7 +1330,7 @@ class WorkerPanel:
         not been scanned in any sense worth putting on a bar.
         """
         return sum(
-            self._cost.scanned_fraction(entry[5], entry[2], now - entry[6]) * entry[2]
+            entry.scanned(self._cost, now) * entry.seconds
             for entry in self._lanes if entry is not None
         )
 
@@ -1389,14 +1380,15 @@ class WorkerPanel:
             lines.append(clip(self._lane_line(lane, entry, now, width), width))
         return lines
 
-    def _lane_line(self, lane: int, entry: tuple | None, now: float, width: int) -> str:
+    def _lane_line(self, lane: int, entry: Passage | None, now: float, width: int) -> str:
         """One worker's row: how far in, which stage, which recording, how big."""
         label = f" {lane + 1:>2}  "
         if entry is None:
             return f"{label}{'·' * _LANE_BAR}    —      idle"
-        _index, rel_path, seconds, size_bytes, started_at, stage, _stage_at = entry
-        elapsed = now - started_at
-        if self._cost.stage_seconds(stage, seconds) > 0:
+        rel_path, seconds, size_bytes, stage = (entry.rel_path, entry.seconds,
+                                                entry.size_bytes, entry.stage)
+        elapsed = now - entry.started_at
+        if entry.expected(self._cost) > 0:
             fraction = self._lane_fraction(entry, now)
             filled = int(round(_LANE_BAR * fraction))
             drawn = "█" * filled + "░" * (_LANE_BAR - filled)

@@ -235,10 +235,19 @@ against the whole file is therefore full before the scan has even begun, and the
 the hour that the work actually takes. Per stage, `[decode]` and `[fft]` each get their own short
 bar and `[scan]` gets a long one that means something.
 
-The estimate behind it is throughput: seconds of wall time per second of audio, per stage,
-measured on this run — and before this run has measured anything, taken from the last time the
-same algorithm ran on this machine (`~/.siar-app/runs.json`). A first run of a new algorithm
-still has nothing to draw with and reports elapsed time alone until its first recording lands.
+The estimate behind it comes from **this recording's own earlier stages**. The transform and the
+scan walk the same magnitude grid, so once `[fft]` has taken eight seconds on this file, the scan
+is about whatever multiple of eight the algorithm's split says — and that holds whatever the
+sample rate, whatever the machine, and whether or not the algorithm has ever run here before. The
+stages that wait on a disk are left out of it: how fast a file was read says more about the page
+cache than about the work ahead.
+
+Only the first stage of the first recording has nothing to go on, and there the last run of the
+same algorithm on this machine fills in (`~/.siar-app/runs.json`, recorded automatically). A
+first run of a new algorithm reports elapsed time alone for a few seconds, then has bars like any
+other. A bar reaches 90% when a stage has taken exactly as long as expected and creeps towards
+99% after that without ever filling: an estimate that has been overtaken should say so by slowing
+down, not by stopping — a frozen bar and a hung run look identical.
 
 `realtime` is the row to plan with: 53.6x means the scan ran 53.6 times faster than the audio it
 scanned, so an hour of recording cost about a minute. It counts only audio this run actually
