@@ -8,7 +8,7 @@ so far. This module owns that arithmetic, because all three displays
 :mod:`siarapp.cli.tui`) draw the same bars and a run whose panel and whose line disagree about
 how far in it is has told the reader that neither can be trusted.
 
-Two rules, both learned the hard way from watching real runs:
+Four rules, every one of them learned the hard way from watching real runs:
 
 * **A bar is per stage, not per recording.** The five stages are nothing like equal —
   :data:`~siarapp.io.performance.TYPICAL_SHARES` puts nearly nine tenths of a recording inside
@@ -19,6 +19,17 @@ Two rules, both learned the hard way from watching real runs:
   worth reporting; one half-way through ``scan`` genuinely is half done, and one that has reached
   ``write`` is finished as far as the algorithm is concerned. Counting it any other way is how a
   bar reads 2% while every worker under it reads 40%.
+* **A stage that can count its own work is never estimated.** Two of the five can: the decode
+  knows how many frames the header promised and how many it has read, and the transform knows how
+  many frames it has left to do. They report that, and :meth:`Passage.report` takes it. Only the
+  scan is genuinely unknowable, which leaves the estimate covering the one stage it has to rather
+  than the three it used to guess at — and the estimate for a stage that takes ten times as long
+  as the seed said is exactly the one that used to fill the bar in the first second.
+* **A bar never goes backwards.** The estimate underneath every bar is rewritten whenever the run
+  learns something, and the largest rewrite of all comes the moment the first recording lands and
+  replaces an assumed split with a measured one. That is the estimate getting better; a bar that
+  drops when it happens is read as work being lost. So each stage's bar holds at its high-water
+  mark until the revised estimate catches it up — see :meth:`Passage.fraction`.
 
 Nothing here draws or formats: it answers "what fraction" and "how many seconds", and the
 displays decide what that looks like.
@@ -198,10 +209,14 @@ class Passage:
         stage: The stage it is in now, ``""`` before it has reported one.
         stage_at: When that stage began — the bar starts again from here.
         spent: Seconds each finished stage of this recording took.
+        measured: The fraction of its current stage this recording has actually *counted*, or
+            ``None`` when that stage cannot count itself and the bar is an estimate. Only
+            ``decode`` and ``fft`` ever set it; see :meth:`report`.
+        highest: The furthest this stage's bar has been drawn — see :meth:`fraction`.
     """
 
     __slots__ = ("index", "rel_path", "seconds", "size_bytes", "started_at", "stage",
-                 "stage_at", "spent")
+                 "stage_at", "spent", "measured", "highest")
 
     def __init__(self, index: int, rel_path: str, seconds: float, size_bytes: int,
                  at: float) -> None:
@@ -212,6 +227,28 @@ class Passage:
         self.started_at = self.stage_at = float(at)
         self.stage = ""
         self.spent: dict[str, float] = {}
+        self.measured: float | None = None
+        self.highest = 0.0
+
+    def report(self, stage: str, fraction: float = 0.0, at: float = 0.0) -> None:
+        """Take one stage message from a worker.
+
+        The single entry point the three displays share, because a stage message means one of two
+        things and which one is not the display's business to work out: a stage that is not the
+        one in hand *begins* it, and a repeat of the current stage carries how far through it the
+        worker has got.
+
+        Args:
+            stage: The :data:`~siarapp.io.performance.PHASES` name.
+            fraction: ``0.0`` to ``1.0`` of real, counted work — frames decoded, frames
+                transformed — or ``0.0`` from a stage that has no way to count itself, which
+                leaves the bar to :meth:`Throughput.stage_fraction`'s estimate.
+            at: When the message was taken.
+        """
+        if stage != self.stage:
+            self.advance(stage, at)
+        if fraction > 0:
+            self.measured = min(1.0, float(fraction))
 
     def advance(self, stage: str, at: float) -> None:
         """Move on to ``stage``, banking what the one before it cost."""
@@ -219,14 +256,53 @@ class Passage:
             self.spent[self.stage] = max(0.0, at - self.stage_at)
         self.stage = stage
         self.stage_at = float(at)
+        self.measured = None
+        self.highest = 0.0
 
     def fraction(self, cost: Throughput, now: float) -> float:
-        """How far through its current stage this recording is."""
-        return cost.stage_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+        """How far through its current stage this recording is.
+
+        Never less than the last answer for this stage. The estimate underneath moves whenever
+        the run learns something — the first recording to land replaces the assumed split with a
+        measured one, and every lane's expectation is rewritten at that moment. That is the
+        estimate improving, but a bar that drops when it happens says something quite different
+        and quite untrue: that work already done has been lost. So the bar holds where it is
+        until the revised estimate catches up with it, which reads as a pause rather than as a
+        reversal. Within one stage the work only ever goes forwards, whatever the guess about
+        how long it will take is doing.
+        """
+        if self.measured is not None:
+            # Counted work, not a guess. Still short of the full bar: the stage is not over until
+            # the next one starts, and a bar sitting at 100% is the lie :data:`_CAP` exists to stop.
+            drawn = _CAP * self.measured
+        else:
+            drawn = cost.stage_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+        return self._ratchet(drawn)
+
+    def _ratchet(self, value: float) -> float:
+        """Hold this stage's bar at the furthest it has been drawn. See :meth:`fraction`."""
+        self.highest = max(self.highest, value)
+        return self.highest
+
+    def counted(self) -> bool:
+        """Whether this recording's current stage is counting its own work."""
+        return self.measured is not None
+
+    def drawable(self, cost: Throughput) -> bool:
+        """Whether there is anything honest to draw a bar from.
+
+        Either the stage counts itself, or there is a throughput to estimate it with. Neither,
+        and the displays print elapsed seconds alone: a bar drawn from nothing is invention.
+        """
+        return self.counted() or self.expected(cost) > 0
 
     def scanned(self, cost: Throughput, now: float) -> float:
         """How much of it to count towards the corpus bar."""
-        return cost.scanned_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+        value = cost.scanned_fraction(self.stage, self.seconds, now - self.stage_at, self.spent)
+        # Inside the scan this is the lane's own bar and shares its high-water mark: a corpus bar
+        # assembled from lanes that go backwards goes backwards too. Before the scan it is zero
+        # and after it is the cap, and neither is anything to hold.
+        return self._ratchet(value) if self.stage == MAIN_PHASE else value
 
     def expected(self, cost: Throughput) -> float:
         """How long its current stage should take, ``0.0`` when there is no telling."""

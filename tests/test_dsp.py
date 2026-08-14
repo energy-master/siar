@@ -107,6 +107,19 @@ def test_blocking_does_not_change_the_answer():
     np.testing.assert_array_equal(blocked, awkward)
 
 
+def test_the_transform_counts_its_own_frames():
+    """It already works in blocks, so how far through it is costs nothing to report — and the
+    alternative is a `[fft]` bar drawn against elapsed time and a guess at what it should cost."""
+    seen: list[tuple[int, int]] = []
+    signal = np.random.default_rng(3).standard_normal(64 * 1200 + 256).astype(np.float32)
+    result = stft(signal, fft_size=256, hop_size=64, on_progress=lambda d, t: seen.append((d, t)))
+
+    assert seen, "a signal spanning several blocks must report more than once"
+    assert [d for d, _ in seen] == sorted(d for d, _ in seen), "frames done only ever rises"
+    assert {t for _, t in seen} == {result.frames}
+    assert seen[-1] == (result.frames, result.frames), "the last block finishes the transform"
+
+
 def test_grid_bytes_is_the_number_the_warning_prints():
     """225,000 frames of 513 float32 bins is the ten-minute-at-96kHz case the CLI warns about."""
     assert grid_bytes(96000 * 600, 1024, 256) == frame_count(96000 * 600, 1024, 256) * 513 * 4

@@ -19,7 +19,7 @@ Channel selection matches ``js/audio/channel.js`` exactly: ``mix`` averages ever
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -42,6 +42,12 @@ AUDIO_EXTENSIONS = (".wav", ".flac", ".aiff", ".aif", ".ogg", ".w64")
 #: ``._name.wav`` beside every file on a non-HFS volume; it is a 4 KB resource fork, not audio,
 #: and a run that tries to decode a few thousand of them logs a few thousand errors.
 _JUNK_PREFIXES = ("._",)
+
+#: Frames read per block by :func:`load_mono`. A million frames is 4 MB of mono ``float32`` and,
+#: at 96 kHz, about eleven seconds of audio: fine enough that the decode bar moves smoothly on
+#: the longest recording in a survey, coarse enough that the per-read overhead is invisible
+#: against the decoding itself.
+_DECODE_BLOCK_FRAMES = 1 << 20
 
 
 class AudioInfo:
@@ -178,12 +184,23 @@ def to_mono(data: np.ndarray, selection: str = "mix") -> np.ndarray:
     raise ValueError(f"unknown channel selection {selection!r} (mix, left, right, or an index)")
 
 
-def load_mono(path: str, *, channel: str = "mix") -> Recording:
+def load_mono(path: str, *, channel: str = "mix",
+              on_progress: Callable[[int, int], None] | None = None) -> Recording:
     """Decode a recording to a mono signal at its native sample rate.
+
+    Read a block at a time rather than in one call, for two reasons that matter on the long
+    recordings this is slowest on. It can *say how far through it is* — the header gives the
+    frame count before a byte is decoded, so ``decode`` is one of the two stages of a recording
+    that reports real progress instead of an estimate against elapsed time. And it never holds
+    the interleaved signal and the mono signal at once: a one-hour stereo recording at 96 kHz is
+    2.6 GiB decoded, and mixing it down from a whole-file read needs both that and the 1.3 GiB
+    result at the same moment.
 
     Args:
         path: The recording.
         channel: See :func:`to_mono`.
+        on_progress: Called ``(frames_done, frames_total)`` as each block lands, with
+            ``frames_total`` of ``0`` when the header would not say how long the file is.
 
     Returns:
         The :class:`Recording`.
@@ -191,14 +208,61 @@ def load_mono(path: str, *, channel: str = "mix") -> Recording:
     Raises:
         OSError: If the file cannot be read or decoded. Callers in a per-file loop should catch
             this and carry on; the run manifest records the failure.
+        ValueError: If ``channel`` names no channel this file has — the user's mistake, the same
+            for every recording in the folder, and not something to bury in a per-file error.
     """
     import soundfile as sf
 
     try:
-        data, rate = sf.read(path, dtype="float32", always_2d=True)
+        handle = sf.SoundFile(path)
     except Exception as e:  # noqa: BLE001 - soundfile raises several unrelated types
         raise OSError(f"could not decode {path}: {e}") from e
-    return Recording(os.path.abspath(path), to_mono(data, channel), rate, data.shape[1])
+
+    with handle:
+        rate, channels, frames = handle.samplerate, handle.channels, int(handle.frames)
+        try:
+            samples = _read_mono(handle, channel, frames, on_progress)
+        except ValueError:
+            raise  # to_mono's: a bad --channel, which is not this file being unreadable
+        except Exception as e:  # noqa: BLE001 - a truncated or corrupt file, mid-decode
+            raise OSError(f"could not decode {path}: {e}") from e
+    return Recording(os.path.abspath(path), samples, rate, channels)
+
+
+def _read_mono(handle, selection: str, frames: int, on_progress) -> np.ndarray:
+    """Read an open recording block by block into one mono signal.
+
+    Args:
+        handle: An open ``soundfile.SoundFile``.
+        selection: See :func:`to_mono`.
+        frames: What the header says the length is, or ``0`` when it will not say. A known
+            length is written into one array allocated up front; an unknown one is collected and
+            joined, which costs a second copy and is why the header is preferred.
+        on_progress: See :func:`load_mono`.
+
+    Returns:
+        The 1-D ``float32`` signal, truncated to what was actually there if the file ends early.
+    """
+    samples = np.empty(frames, dtype=np.float32) if frames > 0 else None
+    parts: list[np.ndarray] = []
+    done = 0
+    for block in handle.blocks(blocksize=_DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True):
+        mono = to_mono(block, selection)
+        if samples is not None:
+            # A file whose header overstates its length is truncated, not fatal: take what fits.
+            end = min(frames, done + mono.shape[0])
+            samples[done:end] = mono[: end - done]
+            done = end
+        else:
+            parts.append(mono)
+            done += mono.shape[0]
+        if on_progress is not None:
+            on_progress(done, frames)
+        if samples is not None and done >= frames:
+            break
+    if samples is None:
+        return np.concatenate(parts) if parts else np.empty(0, dtype=np.float32)
+    return samples if done == frames else samples[:done]
 
 
 def mixed_sample_rates(infos: Iterable[AudioInfo]) -> list[float]:

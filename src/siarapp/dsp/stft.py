@@ -86,6 +86,7 @@ def stft(
     fft_size: int,
     hop_size: int,
     window_name: str = "hann",
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> StftResult:
     """Transform a real mono signal.
 
@@ -94,6 +95,10 @@ def stft(
         fft_size: Power-of-two FFT size, e.g. 1024.
         hop_size: Hop in samples, ``1 <= hop_size <= fft_size``.
         window_name: See :mod:`siarapp.dsp.windows`.
+        on_progress: Called ``(frames_done, frames_total)`` as each block lands. The transform
+            already works in blocks, so this counts real work rather than estimating it — one of
+            the two stages of a recording that can say how far through itself it is, the scan
+            inside a closed bundle being the one that cannot.
 
     Returns:
         The :class:`StftResult`. A signal shorter than one window yields ``frames == 0`` and an
@@ -128,5 +133,7 @@ def stft(
         offsets = (np.arange(start, stop, dtype=np.int64) * hop_size)[:, None]
         block = sig64[offsets + taps[None, :]] * window[None, :]
         magnitudes[start:stop] = np.abs(np.fft.rfft(block, axis=1)).astype(np.float32)
+        if on_progress is not None:
+            on_progress(stop, frames)
 
     return StftResult(magnitudes, frames, bins, fft_size, hop_size, window_name)

@@ -211,16 +211,19 @@ class TuiDisplay:
             self._ensure_lanes(lane)
             self._lanes[lane] = None
 
-    def on_stage(self, lane: int, stage: str) -> None:
-        """A worker has moved on to another stage: this lane's bar starts again, from zero.
+    def on_stage(self, lane: int, stage: str, fraction: float = 0.0) -> None:
+        """What a worker is doing now, and how far into it.
 
-        The stage is the one thing that changes on a lane's row between taking a recording and
-        finishing it, and on a long file that is minutes of otherwise motionless screen.
+        A stage the lane is not already on starts its bar again from zero; a repeat of the one it
+        is on carries that stage's own count of its work, for the two that can count it.
+
+        Between taking a recording and finishing it this is the only thing that changes on a
+        lane's row, and on a long file that is minutes of otherwise motionless screen.
         """
         with self._lock:
             self._ensure_lanes(lane)
             if self._lanes[lane] is not None:
-                self._lanes[lane].advance(stage, time.time())
+                self._lanes[lane].report(stage, fraction, time.time())
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into every counter the frame draws."""
@@ -680,13 +683,14 @@ class TuiDisplay:
             rel_path, seconds, size_bytes = entry.rel_path, entry.seconds, entry.size_bytes
             spent = now - entry.started_at
             fraction = self._lane_fraction(entry, now)
-            if entry.expected(self._cost) > 0:
+            if entry.drawable(self._cost):
                 filled = int(round(_LANE_BAR * fraction))
                 stat = (paint("█" * filled, GREEN) + paint("░" * (_LANE_BAR - filled), DIM)
                         + f" {100.0 * fraction:3.0f}% {spent:5.0f}s")
             else:
-                # Nothing finished and no prior for this algorithm on this machine, so there is
-                # no throughput to predict with. Elapsed alone: a bar from nothing is invention.
+                # This stage cannot count itself, nothing has finished, and there is no prior for
+                # this algorithm on this machine, so there is no throughput to predict with.
+                # Elapsed alone: a bar from nothing is invention.
                 stat = paint("░" * _LANE_BAR, DIM) + f"   —  {spent:5.0f}s"
             # This lane's own speed, beside this lane's own bar.
             stat += "  " + paint(f"{factor_text(self._lane_factor(lane)):>7}", CYAN)

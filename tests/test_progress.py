@@ -1,9 +1,11 @@
 # Vixen Intelligence c.2026
 """What the bars mean, which is the only thing a live display is for.
 
-Every one of them is an estimate — a scanner bundle reports nothing from inside ``scan`` — so
-the tests here are about the two rules that keep an estimate useful rather than decorative: a bar
-belongs to a stage, and the corpus bar counts the scan.
+The scan is an estimate and can be nothing else — a scanner bundle reports nothing from inside
+``scan`` — so most of what is tested here is the arithmetic that keeps an estimate useful rather
+than decorative: a bar belongs to a stage, the corpus bar counts the scan, a bar never runs
+backwards when the estimate under it is revised, and a stage that can count its own work is not
+estimated at all.
 """
 from __future__ import annotations
 
@@ -131,6 +133,77 @@ def test_a_passage_banks_each_stage_as_it_leaves_it():
     # Sized off this recording's own stages, with nothing else to go on anywhere.
     assert passage.expected(cost) > 0
     assert passage.fraction(cost, 1042.0) == 0.0
+
+
+def test_a_stage_that_counts_its_own_work_is_not_estimated():
+    """`decode` and `fft` know how many frames they have done. Nothing needs guessing for them."""
+    cost = Throughput(rate=600.0 / HOUR, shares=PHASES_OF_AN_HOUR)
+    passage = Passage(1, "station/0410.wav", HOUR, 3_500_000_000, at=1000.0)
+    passage.report("decode", 0.0, 1000.0)
+    assert not passage.counted()
+
+    passage.report("decode", 0.5, 1001.0)
+    assert passage.counted()
+    # Half the frames read is half the bar, whatever the estimate would have said and whatever
+    # the clock says — this is the one number on screen that is not an opinion.
+    assert passage.fraction(cost, 1001.0) == pytest.approx(0.495, rel=0.02)
+    # ...and a stage that has been quicker than the whole seed said still reads as half done.
+    assert passage.fraction(cost, 9999.0) == pytest.approx(0.495, rel=0.02)
+
+
+def test_counted_work_is_drawn_with_no_history_and_no_finished_stage():
+    """The first stage of the first recording of a first run used to have no bar at all."""
+    cost = Throughput()
+    passage = Passage(1, "station/0410.wav", HOUR, 3_500_000_000, at=1000.0)
+    passage.report("decode", 0.0, 1000.0)
+    assert not passage.drawable(cost), "nothing measured, nothing known: elapsed seconds only"
+    passage.report("decode", 0.25, 1030.0)
+    assert passage.drawable(cost) and passage.fraction(cost, 1030.0) > 0.2
+
+
+def test_a_new_stage_starts_the_bar_again_and_forgets_what_was_counted():
+    cost = Throughput(rate=600.0 / HOUR, shares=PHASES_OF_AN_HOUR)
+    passage = Passage(1, "station/0410.wav", HOUR, 3_500_000_000, at=1000.0)
+    passage.report("decode", 0.0, 1000.0)
+    passage.report("decode", 0.9, 1006.0)
+    passage.report("fft", 0.0, 1006.0)
+    assert passage.stage == "fft" and not passage.counted()
+    assert passage.spent == {"decode": 6.0}
+    assert passage.fraction(cost, 1006.0) == pytest.approx(0.0, abs=0.01)
+
+
+def test_a_bar_holds_rather_than_going_backwards_when_the_estimate_is_revised():
+    """The first recording to land rewrites every lane's estimate. None of them may drop.
+
+    A bar that falls says work has been lost, which is never what happened: what changed is the
+    guess about how much is left. It holds until the new estimate catches it up, which reads as
+    a pause — and the elapsed seconds beside it keep moving, so the run still looks alive.
+    """
+    cost = Throughput(rate=600.0 / HOUR, shares=PHASES_OF_AN_HOUR)
+    passage = Passage(1, "station/0410.wav", HOUR, 3_500_000_000, at=1000.0)
+    passage.report("scan", 0.0, 1000.0)
+    half = passage.fraction(cost, 1280.0)
+    assert half == pytest.approx(0.45, rel=0.02)
+
+    # A recording lands and says this algorithm's scan is four times what the seed thought.
+    cost.learn(HOUR, 2400.0, {"decode": 6.0, "fft": 30.0, "scan": 2360.0})
+    assert cost.stage_fraction("scan", HOUR, 280.0) < half, "the estimate itself did drop"
+    assert passage.fraction(cost, 1280.0) == pytest.approx(half), "the bar did not"
+    # And it goes on from where it held, rather than starting the climb again.
+    assert passage.fraction(cost, 2400.0) > half
+
+
+def test_the_corpus_bar_holds_with_the_lanes_it_is_built_from():
+    """A corpus bar assembled from lanes that go backwards goes backwards too."""
+    cost = Throughput(rate=600.0 / HOUR, shares=PHASES_OF_AN_HOUR)
+    passage = Passage(1, "station/0410.wav", HOUR, 3_500_000_000, at=1000.0)
+    passage.report("scan", 0.0, 1000.0)
+    scanned = passage.scanned(cost, 1280.0)
+    cost.learn(HOUR, 2400.0, {"decode": 6.0, "fft": 30.0, "scan": 2360.0})
+    assert passage.scanned(cost, 1280.0) == pytest.approx(scanned)
+    # The stages after the scan still count in full, ratchet or no ratchet.
+    passage.report("write", 0.0, 1400.0)
+    assert passage.scanned(cost, 1400.0) == pytest.approx(0.99)
 
 
 def test_only_the_compute_stages_may_size_the_ones_after_them():

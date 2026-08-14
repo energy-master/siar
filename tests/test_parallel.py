@@ -105,7 +105,7 @@ def test_a_worker_says_which_stage_it_is_on(corpus, stub, tmp_path):
     stages: list[tuple] = []
     run_folder(
         stub, str(corpus), str(tmp_path / "out"), RunOptions(workers=3),
-        on_stage=lambda lane, stage: stages.append((lane, stage)),
+        on_stage=lambda lane, stage, fraction=0.0: stages.append((lane, stage)),
     )
     assert stages, "a parallel run reported no stages at all"
     assert {stage for _lane, stage in stages} <= set(PHASES)

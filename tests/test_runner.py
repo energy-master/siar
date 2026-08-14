@@ -235,7 +235,7 @@ def test_a_run_says_which_stage_each_recording_is_on(corpus, stub, tmp_path):
     run_folder(
         stub, str(corpus), str(tmp_path / "out"), RunOptions(),
         on_start=lambda i, total, rel, dur, lane, size: starts.append((rel, dur, size, lane)),
-        on_stage=lambda lane, stage: seen.append((lane, stage)),
+        on_stage=lambda lane, stage, fraction=0.0: seen.append((lane, stage)),
     )
     stages = [stage for _lane, stage in seen]
     # loud.wav in full, then quiet.wav, then tiny.wav — which is too short to reach `scan`.

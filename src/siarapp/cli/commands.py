@@ -1029,11 +1029,11 @@ class ScanReporter:
     def on_idle(self, lane: int) -> None:
         """Nothing to do: a serial run has one lane and it is idle only when the run is over."""
 
-    def on_stage(self, lane: int, stage: str) -> None:
-        """The recording has moved on to another stage. One lane here, so ``lane`` is ignored."""
+    def on_stage(self, lane: int, stage: str, fraction: float = 0.0) -> None:
+        """What the recording is doing, and how far into it. One lane here, so ``lane`` is ignored."""
         with self._lock:
             if self._current is not None:
-                self._current.advance(stage, time.time())
+                self._current.report(stage, fraction, time.time())
 
     def on_start(self, index: int, total: int, rel_path: str, duration_sec: float,
                  lane: int = 0, size_bytes: int = 0) -> None:
@@ -1114,18 +1114,22 @@ class ScanReporter:
             head += f"  {size_and_length(current.size_bytes, current.seconds)}"
         head += f"  {stage_tag(current.stage)}"
 
-        expected = current.expected(self._cost)
-        if expected <= 0:
-            # The first stage of the first recording of a first run: nothing measured on this file
-            # and nothing in the history, so there is nothing to draw a bar from. Elapsed alone,
-            # which at least says the run is alive — and one stage later there is an estimate.
+        if not current.drawable(self._cost):
+            # The scan of the first recording of a first run: a stage that cannot count itself,
+            # nothing measured on this file and nothing in the history, so there is nothing to
+            # draw a bar from. Elapsed alone, which at least says the run is alive.
             return f"{head} {elapsed:.0f}s"
 
+        expected = current.expected(self._cost)
         fraction = current.fraction(self._cost, now)
         filled = int(round(BAR_WIDTH * fraction))
         drawn = "█" * filled + "░" * (BAR_WIDTH - filled)
+        # No "of ~Ns" against counted work: the bar is the measurement, and an estimate printed
+        # beside it would only be there to be wrong.
+        pace = f"{in_stage:.0f}s" if expected <= 0 or current.counted() \
+            else f"{in_stage:.0f}s of ~{expected:.0f}s"
         return (f"{head} {drawn} {fraction * 100:2.0f}%  "
-                f"{in_stage:.0f}s of ~{expected:.0f}s  ·  {elapsed:.0f}s on the file")
+                f"{pace}  ·  {elapsed:.0f}s on the file")
 
 
 #: Lane bar width in the worker panel. Narrower than the download bar because there is one per
@@ -1222,12 +1226,13 @@ class WorkerPanel:
             self._ensure_lanes(lane)
             self._lanes[lane] = None
 
-    def on_stage(self, lane: int, stage: str) -> None:
-        """A worker has moved on to another stage: this lane's bar starts again, from zero."""
+    def on_stage(self, lane: int, stage: str, fraction: float = 0.0) -> None:
+        """A worker has said what it is doing: a new stage starts this lane's bar again from zero,
+        and a repeat of the current one carries how far through it that worker has got."""
         with self._lock:
             self._ensure_lanes(lane)
             if self._lanes[lane] is not None:
-                self._lanes[lane].advance(stage, time.time())
+                self._lanes[lane].report(stage, fraction, time.time())
 
     def on_result(self, done: int, total: int, result) -> None:
         """A recording is finished: fold it into the totals."""
@@ -1388,14 +1393,15 @@ class WorkerPanel:
         rel_path, seconds, size_bytes, stage = (entry.rel_path, entry.seconds,
                                                 entry.size_bytes, entry.stage)
         elapsed = now - entry.started_at
-        if entry.expected(self._cost) > 0:
+        if entry.drawable(self._cost):
             fraction = self._lane_fraction(entry, now)
             filled = int(round(_LANE_BAR * fraction))
             drawn = "█" * filled + "░" * (_LANE_BAR - filled)
             stat = f"{drawn} {fraction * 100:3.0f}%  {elapsed:4.0f}s"
         else:
-            # Nothing has finished and there is no prior for this algorithm, so there is no
-            # throughput to predict with. Elapsed alone: a bar drawn from nothing is invention.
+            # This stage cannot count itself, nothing has finished and there is no prior for this
+            # algorithm, so there is no throughput to predict with. Elapsed alone: a bar drawn
+            # from nothing is invention.
             stat = f"{'░' * _LANE_BAR}   —   {elapsed:4.0f}s"
         stat = f"{stat}  {factor_text(self._lane_factor(lane)):>7}"
         stat = f"{stat}  {stage_tag(stage)}"

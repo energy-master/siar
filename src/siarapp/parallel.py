@@ -275,11 +275,16 @@ def _scan_path(index: int, path: str) -> tuple:
     )
 
 
-def _stage_reporter(index: int) -> Callable[[str], None] | None:
+def _stage_reporter(index: int) -> Callable[..., None] | None:
     """A callback that posts this file's stage changes back to the parent, or ``None``.
 
     ``None`` when nobody upstream asked for stages, so a run whose display does not draw them
-    does not pay for five queue writes per recording.
+    does not pay for the queue writes.
+
+    Carries a fraction as well as a name, for the stages that count their own work — the parent
+    cannot see how many frames a worker has decoded, and elapsed time is a poor guess at it. The
+    rate those arrive at is :data:`~siarapp.runner._PROGRESS_INTERVAL_SEC`, decided where the
+    stages are, not here.
 
     A failed ``put`` is dropped on purpose. The queue is a display feed: a worker that cannot say
     what stage it is on must still finish the recording, and a scan that died because a progress
@@ -289,9 +294,9 @@ def _stage_reporter(index: int) -> Callable[[str], None] | None:
     if queue is None:
         return None
 
-    def report(stage: str) -> None:
+    def report(stage: str, fraction: float = 0.0) -> None:
         try:
-            queue.put_nowait((index, stage))
+            queue.put_nowait((index, stage, fraction))
         except Exception:  # noqa: BLE001 - a full or closed queue is not this recording's problem
             pass
 
@@ -313,7 +318,7 @@ def scan_parallel(
     *,
     on_start: Callable[[int, int, str, float, int, int], None] | None = None,
     on_idle: Callable[[int], None] | None = None,
-    on_stage: Callable[[int, str], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> Iterator[tuple]:
     """Scan every file across ``workers`` processes, yielding results as they land.
 
@@ -331,10 +336,11 @@ def scan_parallel(
             handed to a worker. ``lane`` is a display slot, ``0`` to ``workers - 1``, held for as
             long as that file is being scanned and then reused by the next one.
         on_idle: ``(lane)`` when a lane has no more work — only at the tail of a run.
-        on_stage: ``(lane, stage)`` as a worker moves onto each stage of its recording. Workers
-            post these to a queue which this generator drains while it waits, so a lane's row can
-            say what it is doing during the many minutes a scan takes. Passing ``None`` leaves
-            the queue uncreated and the workers silent.
+        on_stage: ``(lane, stage, fraction)`` as a worker moves onto each stage of its recording,
+            and again as that stage counts its way through itself where it can — ``fraction`` is
+            ``0.0`` when it cannot. Workers post these to a queue which this generator drains
+            while it waits, so a lane's row can say what it is doing during the many minutes a
+            scan takes. Passing ``None`` leaves the queue uncreated and the workers silent.
 
     Yields:
         ``(index, FileResult)`` in completion order, which is not input order: a two-second clip
@@ -384,12 +390,12 @@ def scan_parallel(
         """
         while stages is not None:
             try:
-                index, stage = stages.get_nowait()
+                index, stage, fraction = stages.get_nowait()
             except Exception:  # noqa: BLE001 - Empty, and anything a closing queue raises
                 return
             lane = lane_of.get(index)
             if lane is not None:
-                on_stage(lane, stage)
+                on_stage(lane, stage, fraction)
 
     try:
         for _ in range(workers):

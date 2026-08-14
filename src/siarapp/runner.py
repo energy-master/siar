@@ -230,12 +230,58 @@ def plan_grid(algorithm: Any, options: RunOptions) -> dict:
     return {"fft": fft, "hop": hop, "window": window}
 
 
+#: How often a stage may report its own progress. The displays repaint four times a second, so
+#: anything faster than this is a message nobody sees — and on a parallel run every one of them
+#: crosses a process boundary. Slow enough to be free, quick enough that the bar never looks like
+#: it has stopped.
+_PROGRESS_INTERVAL_SEC = 0.1
+
+
+def _progress_reporter(
+    on_stage: Callable[..., None] | None,
+    stage: str,
+) -> Callable[[int, int], None] | None:
+    """A ``(done, total)`` callback that posts ``stage``'s real progress upstream.
+
+    The stages that can count their own work — decoding a known number of frames, transforming a
+    known number of them — do it in blocks and would otherwise report thousands of times per
+    recording. Rate-limiting it here rather than in either of them keeps both ignorant of what a
+    display costs, and puts the one definition of "often enough" in the module that owns the
+    stages.
+
+    Args:
+        on_stage: The run's stage callback, or ``None`` when nobody is watching — in which case
+            so is this, and neither the decode nor the transform pays anything for it.
+        stage: Which :data:`PHASES` name the progress belongs to.
+
+    Returns:
+        The callback, or ``None``.
+    """
+    if on_stage is None:
+        return None
+    # From now, not from zero: a stage that finishes inside one interval says nothing at all
+    # beyond having begun, which is the whole of what there is to say about it.
+    last = time.time()
+
+    def report(done: int, total: int) -> None:
+        nonlocal last
+        if total <= 0:
+            return
+        now = time.time()
+        if now - last < _PROGRESS_INTERVAL_SEC:
+            return
+        last = now
+        on_stage(stage, min(1.0, done / total))
+
+    return report
+
+
 def scan_one(
     algorithm: Any,
     recording: Recording,
     plan: dict,
     phases: dict | None = None,
-    on_stage: Callable[[str], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> tuple[list[dict], FrameGrid]:
     """Transform one decoded recording and scan it.
 
@@ -246,9 +292,10 @@ def scan_one(
         phases: Optional dict to record timings into, as ``fft`` and ``scan`` seconds. Written
             into rather than returned so the two callers that want a breakdown can have one
             without changing what this returns for the ones that do not.
-        on_stage: Called with each stage's name as it begins. The same names :data:`PHASES`
-            uses, so what a display says is happening and what the closing table charges it to
-            are the same thing.
+        on_stage: Called with each stage's name as it begins, and again with ``(stage, fraction)``
+            as that stage counts its own work where it can. The same names :data:`PHASES` uses,
+            so what a display says is happening and what the closing table charges it to are the
+            same thing.
 
     Returns:
         ``(regions, grid)``. An empty region list and a zero-frame grid when the recording is
@@ -262,6 +309,7 @@ def scan_one(
         fft_size=plan["fft"],
         hop_size=plan["hop"],
         window_name=plan["window"],
+        on_progress=_progress_reporter(on_stage, "fft"),
     )
     grid = FrameGrid(
         result.magnitudes,
@@ -295,7 +343,7 @@ def run_folder(
     on_start: Callable[[int, int, str, float, int, int], None] | None = None,
     on_corpus: Callable[[int, float, int], None] | None = None,
     on_idle: Callable[[int], None] | None = None,
-    on_stage: Callable[[int, str], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
     warn: Callable[[str], None] | None = None,
 ) -> dict:
     """Scan every recording under ``source_root`` and build the output folder.
@@ -319,10 +367,12 @@ def run_folder(
             recording is opened.
         on_idle: Called ``(lane)`` when a worker slot runs out of work, at the tail of a parallel
             run.
-        on_stage: Called ``(lane, stage)`` as each stage of a recording begins — the
-            :data:`~siarapp.io.performance.PHASES` names. Between ``on_start`` and the result
-            this is the only thing that moves, and on a long recording it is the difference
-            between a display that says "still going" and one that says which part is slow.
+        on_stage: Called ``(lane, stage, fraction)`` as each stage of a recording begins — the
+            :data:`~siarapp.io.performance.PHASES` names — and repeatedly during the stages that
+            can count their own work, with how far through it they are. Between ``on_start`` and
+            the result this is the only thing that moves, and on a long recording it is the
+            difference between a display that says "still going" and one that says which part is
+            slow and how far into it the worker has got.
         warn: Called with one-line warnings (mixed sample rates, oversized grids).
 
     Returns:
@@ -457,7 +507,7 @@ def _scan_serially(
     durations: list[float],
     sizes: list[int],
     on_start: Callable[[int, int, str, float, int, int], None] | None,
-    on_stage: Callable[[int, str], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> Iterator[tuple]:
     """Scan every file in this process, yielding ``(index, FileResult)`` in folder order.
 
@@ -467,7 +517,8 @@ def _scan_serially(
     """
     total = len(files)
     # Lane 0, always: a serial run is one worker, and the display it feeds has one row.
-    stage = None if on_stage is None else (lambda name: on_stage(0, name))
+    stage = None if on_stage is None else (
+        lambda name, fraction=0.0: on_stage(0, name, fraction))
     for index, path in enumerate(files):
         if on_start is not None:
             on_start(index + 1, total, out.rel_path(path), durations[index], 0, sizes[index])
@@ -519,7 +570,7 @@ def scan_file(
     out: OutputFolder,
     plan: dict,
     options: RunOptions,
-    on_stage: Callable[[str], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> FileResult:
     """Decode, scan and write one recording. Never raises for a per-file problem.
 
@@ -533,10 +584,11 @@ def scan_file(
         out: The output folder to write into.
         plan: The grid from :func:`plan_grid`.
         options: The run options.
-        on_stage: Called with each :data:`PHASES` name as that stage begins, for a display that
-            would otherwise have nothing to say for the several minutes one recording can spend
-            inside ``scan``. A recording that is skipped or fails reports the stages it reached
-            and no more.
+        on_stage: Called with each :data:`PHASES` name as that stage begins, and with
+            ``(stage, fraction)`` as ``decode`` and ``fft`` count their way through themselves,
+            for a display that would otherwise have nothing to say for the several minutes one
+            recording can spend inside ``scan``. A recording that is skipped or fails reports the
+            stages it reached and no more.
 
     Returns:
         The :class:`FileResult` for this recording, whatever happened to it.
@@ -552,7 +604,8 @@ def scan_file(
     if on_stage is not None:
         on_stage("decode")
     try:
-        recording = load_mono(path, channel=options.channel)
+        recording = load_mono(path, channel=options.channel,
+                              on_progress=_progress_reporter(on_stage, "decode"))
     except OSError as e:
         return FileResult(rel, "error", elapsed_sec=time.time() - started, error=str(e),
                           phases={"decode": time.time() - started})
