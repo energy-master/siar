@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import threading
 import urllib.error
@@ -135,6 +136,33 @@ def test_the_page_itself_needs_no_token(served):
         if status == 200 and path == "/":
             assert "text/html" in headers["Content-Type"]
             assert "default-src 'self'" in headers.get("Content-Security-Policy", "")
+
+
+def test_a_panel_hidden_by_the_attribute_stays_hidden(served):
+    """The page shows and hides every panel through the ``hidden`` attribute, and the attribute
+    only carries the user agent's ``display: none`` — which any author rule with a ``display`` in
+    it outranks. ``.nokey`` is one: it is ``display: grid``, so without the reset below the "this
+    page needs the token" curtain covers the viewer on every load, token or no token."""
+    base, _token, _out, _manifest = served
+    status, _headers, body = _fetch(f"{base}/viewer.css")
+    if status != 200:
+        pytest.skip("the page is not in this tree")
+    css = body.decode()
+    assert re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", css), css[:400]
+
+
+def test_a_lane_reads_its_path_the_way_it_is_spelled(served):
+    """``.lane-path`` is right-to-left so a long path loses its start rather than its filename.
+    That reorders the path's own punctuation — ``134250533.191114211719.wav`` renders as
+    ``wav.134250533…`` — unless the text is isolated from the container's direction."""
+    base, _token, _out, _manifest = served
+    status, _headers, body = _fetch(f"{base}/viewer.css")
+    if status != 200:
+        pytest.skip("the page is not in this tree")
+    css = body.decode()
+    script = _fetch(f"{base}/viewer.js")[2].decode()
+    assert "direction: rtl" in css
+    assert "createElement('bdi')" in script
 
 
 # -- what it will not do -------------------------------------------------------------------

@@ -16,6 +16,12 @@
 
 * { box-sizing: border-box; }
 
+/* Everything on this page is shown and hidden through the `hidden` attribute, and the attribute
+ * only carries `display: none` from the user-agent sheet — any author rule with a `display` in it
+ * wins on specificity and the element stays on screen. Said once here rather than remembered at
+ * every rule that sets one. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0; background: var(--ground); color: var(--ink);
   font-family: var(--sans); font-size: 15px; line-height: 1.5;

@@ -182,9 +182,14 @@ const laneNode = (row) => {
   lane.tabIndex = 0
   lane.dataset.path = row.path
 
+  // The lane is right-to-left so a long path loses its start rather than its filename. That
+  // reorders the path's own punctuation — `134250533.191114211719.wav` comes out `wav.134250533…`
+  // — unless the text is isolated from the container's direction, which is what <bdi> is for.
   const path = document.createElement('div')
   path.className = 'lane-path'
-  path.textContent = row.path
+  const name = document.createElement('bdi')
+  name.textContent = row.path
+  path.append(name)
   path.title = row.path
 
   const badge = document.createElement('div')
