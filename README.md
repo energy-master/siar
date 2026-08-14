@@ -1,10 +1,11 @@
 # siar-app
+## One library for edge and high performance computing
 
 **SIaR — Signal Information and Reconnaissance.** 
 
-Run our models locally against your dataset securely and offline.
+Run our models locally against your dataset securely and offline. SIaR allows you to point our model(s) against your dataset and build resulting datasets in your own secure and offline environment. Download the models you wish to use and run them. All output can be viewed by dropping your output folder into IDent dynamics at [goident.ai] or view locally in our slimmed down version of the viewer.
 
-SIaR allows you to point our model(s) against your dataset and build resulting datasets in your own secure and offline environment. Download the models you wish to use and run them. All output can be viewed by dropping your output folder into IDent dynamics at [goident.ai] or view locally in our slimmed down version of the viewer.
+SIar is optimised for both high performance computing (HPC) setup and edge processing. Simply add --parallel to your run an ditribute your compute across your hardware. 
 
 The data pipeline:
 ```
@@ -342,8 +343,7 @@ Two things to know before turning it up:
 
 ### Watching a long run: `--tui`
 
-`--tui` replaces the per-file lines with one panel, redrawn in place, holding everything worth
-knowing while a survey is still going:
+`--tui` replaces the per-file lines with one panel displaying key metrics in real-time:
 
 ```bash
 siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --parallel --tui
@@ -372,27 +372,7 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 ╰───────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The stage block is the reason to use it: it says an hour in whether the run is spending its time
-in the algorithm — where it should — or in the thumbnails, and both cures are one flag. Failures
-stay on screen instead of scrolling past, and are reprinted as ordinary lines when the panel comes
-down, so nothing is lost to a wiped frame.
-
-It takes the screen — the alternate buffer, the one `vim` and `less` use — and fills the terminal's
-full width and height, repainted from the top left on every tick, in colour where the terminal has
-it. Resize the window mid-run and the next tick draws it at the new size.
-
-**When the run finishes the panel stays up**, with the closing metrics in place of the live stage
-block, and waits: the clock stops, the lanes go, and the last line says `Ctrl-Q (or q) to close
-this panel`. A panel that wiped itself the moment the last recording landed would take the answer
-with it. Press it and the buffer is handed back untouched — your shell looks exactly as it did,
-with the same summary printed under the command that started the run, so it is in the scrollback
-too.
-
-Sections are dropped in a fixed order when the window is too short, so a small one still shows the
-bar and the totals, and the completions list stretches to reach the bottom rule so a tall one is
-full of run rather than empty below the middle. Colour is never the only thing carrying a meaning —
-a red row also says ERROR, a green bar is also longer — and `NO_COLOR` or `TERM=dumb` turns it off.
-It needs a terminal: piped into a log, `--tui` falls back to one line per recording and says so.
+The stage duration data allows you to fine tune and understand where compute is spent.
 
 ## 5. Open the result in IDent Dynamics
 
@@ -408,27 +388,18 @@ The output folder mirrors your input folder's layout:
   siar-app-performance.json        what it cost — see below
 ```
 
-Every sidecar declares the **family** of the model that wrote it, so the app can tell what kind
-of results it is opening rather than guessing from which fields are present. A structure seeker
-and a click detector both emit boxes with the same nine fields; only the family says which is
-which.
+Every structure declaration declares the **family** of the model that wrote it, so IDent dynamics automatically structures itself around it.
 
 In the web app, use **Open folder** and pick `~/survey-scan`. Every recording appears as a lane
 with its spectrogram preview; click one and its boxes are drawn over the surface, counted by
 shape in the **Structures** panel and enumerated one row per box in the **Structure list**.
 Hovering a row lights its box and vice versa, and clicking a box promotes it to a label.
 
-Save it as a **work project** and the whole thing — folder, boxes and any labels you have made —
-comes back in one click next time.
+Save it as a **work project** for quick retrieval in the future.
 
-## 6. Look at a scan that is on another machine: `siar-app serve`
+## 6. Look at a scan that is on another machine: `siar-app serve` (HPC)
 
-A survey is often scanned where the cores are — a headless box that gets through in four hours what
-a laptop would take two days over. That leaves the output folder in the wrong place, and it is the
-one thing you cannot conveniently move: it holds a copy of every recording, so a real corpus is
-hundreds of gigabytes and copying it costs more time than the fast machine saved.
-
-What you actually want to look at is tiny. So serve the folder where it is:
+A survey is often scanned where the cores are, namely a remote server. Rather than copying the results folder over, simply serve the folder to your local machine and view the results on your local browser. 
 
 ```bash
 # on the machine that did the scanning
@@ -456,33 +427,13 @@ a lane with its thumbnail, its outcome and its structure count; click one and it
 over a spectrogram, with the run's performance table and the other runs on that box a click away.
 
 **It sends a picture, not the audio.** Opening a lane fetches a reduced spectrogram computed on the
-remote machine — dB-normalised, quantised to a byte per cell, decimated to the width being drawn —
-which is about 350 KB whatever the recording's length. The alternative is worse than it sounds: a
-full analysis grid is *four times* the size of the audio it came from (a 40-minute 96 kHz recording
-is 440 MB of WAV and 1.76 GB of magnitudes), and even the WAV is a bad trade for a picture you are
-going to look at once. The recordings themselves are fetched only if you press play or download,
+remote machine.  The recordings themselves are downloaded only if you press play or download,
 and `--no-audio` refuses even that.
 
-It is also cheap on the remote box, because the picture is drawn from a few thousand seeks rather
-than a decode: the cost is the number of columns asked for, not the duration. Measured on 96 kHz
-noise, a 2000×256 preview takes about 85 ms whether the recording is one minute or ten, while
-decoding the same files takes 16 ms and 172 ms respectively — the crossover is at about five
-minutes and the gap widens from there.
 
 **Serve a run that is still going.** The daemon reads the run manifest, which `siar-app run`
 rewrites after every recording, so a scan started this morning can be watched from your laptop this
-afternoon: the bar fills, new lanes appear, and the page says how old the numbers are rather than
-implying they are live.
-
-Two things worth knowing:
-
-* **The index is the run's manifest, not a census of the folder.** A resumed run lists the files it
-  skipped, so the usual case is complete — but if the most recent run over that folder used
-  `--limit`, or two runs covered different subsets, the page shows what that manifest lists and says
-  so beside the totals.
-* **The token is not optional and the bind is loopback.** A fresh token is minted per invocation and
-  required on every request. `--bind` anything other than loopback needs `--allow-remote` as well,
-  because a bearer token over plain HTTP on a survey LAN is a different proposition from a tunnel.
+afternoon. 
 
 | Flag | Meaning |
 |---|---|
@@ -497,9 +448,6 @@ Two things worth knowing:
 
 With no folder argument it serves the most recent run from `siar-app runs`.
 
-This page is deliberately a browsing tool, not the viewer: no 3D surface, no labelling, no model
-runs, and no way to write anything. When you want those, that is what dropping the folder into
-IDent Dynamics is for.
 
 ## Command reference
 
@@ -590,7 +538,7 @@ one-character marker per line, and the numbering and step list follow whatever i
 
 ### `siar-app readme`
 
-This document, rendered and opened in your browser.
+Open README in your browser.
 
 ```bash
 $ siar-app readme
@@ -663,8 +611,7 @@ token, so it doubles as a "am I signed in" test in a script.
 
 The catalogue your installation's super user has published. Columns are the name (what you pass
 to `run -a`), what shapes it finds, whether a build exists for this machine, how users have
-[rated](#siar-app-feedback-name) it, and the description — which is written in the admin
-panel, so it says what the algorithm is actually being used for.
+[rated](#siar-app-feedback-name) it, and model description.
 
 | Flag | Meaning |
 |---|---|
@@ -676,7 +623,7 @@ panel, so it says what the algorithm is actually being used for.
 `RATED` shows the mean score and how many people gave one; `—` means nobody has rated it yet,
 which is deliberately not the same as a low score.
 
-Models are printed **one table per family**. Every SIaR model belongs to exactly one family. The families and their order are set by your installation's super user, not by this application.
+Models are printed **one table per family**. Every SIaR model belongs to exactly one family. 
 
 Two footnotes may appear under the table. **"no build for `<tag>`"** means the algorithm exists
 but not for your OS/architecture/Python. **A `*` beside
@@ -721,8 +668,7 @@ prints a warning and still gives you the local answer.
 
 ### `siar-app scan FOLDER`
 
-Reads headers only — no decode, no algorithm, no login — so a multi-GB corpus is summarised in
-about a second. Prints the recording count, the total duration, and a sample-rate breakdown.
+Read all the headers and grab relevant data for display before starting a run.
 
 | Flag | Meaning |
 |---|---|
@@ -747,7 +693,7 @@ required and must not be the folder being accessed for input data.
 | `--refresh` | re-download even if the bundle is already cached |
 | `--server URL` | which install to download from |
 
-**Analysis grid** — defaults come from the algorithm, which carries the grid it was tuned at.
+**Analysis grid** — defaults come from the algorithm which carries the grid it was tuned at.
 Override only if you know why.
 
 | Flag | Meaning |
