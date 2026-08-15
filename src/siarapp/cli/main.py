@@ -7,6 +7,8 @@ This module builds the argparse tree and dispatches; the work is in
 
 Subcommands:
 
+* ``siar-app`` (no command) and ``siar-app lib`` — the library: everything this machine can run,
+  the bots and features behind each of it, and the form that starts a scan.
 * ``siar-app version``    — the package version and this machine's build tag.
 * ``siar-app license``    — show the licence, or accept it non-interactively.
 * ``siar-app quick-start``— open the illustrated quickstart in a browser, offline.
@@ -106,7 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "Run the IDent Dynamics structure scanners over a folder of recordings.",
         epilog="New here? Run siar-app quick-start for the illustrated walkthrough, or "
                "siar-app readme for the manual. Otherwise: siar-app signup (or login), "
-               "then siar-app algorithms.",
+               "then siar-app algorithms. With no command at all it opens the library — "
+               "the same screen as siar-app lib.",
     )
     parser.add_argument("--version", action="version", version=f"siar-app {__version__}")
     # Accepted on BOTH sides of the subcommand. `siar-app login --server URL` is what
@@ -156,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_readme.add_argument("--text", action="store_true",
                           help="print it as Markdown instead of opening a browser")
+
+    sub.add_parser(
+        "lib",
+        aliases=["library"],
+        help="browse what this machine can run, and start a scan from it",
+        description="The library: the algorithm bundles downloaded here and the models built "
+        "here with siar-build, on one screen, with the bots and features behind each of them — "
+        "then an input, an output and a worker count, and Enter to run. It is what `siar-app` "
+        "with no command opens, and it needs a terminal.",
+        epilog="Keys: ↑↓ select, tab pane, i input, o output, p parallel, enter edit or run, "
+               "R reload, q quit.",
+    )
 
     p_signup = sub.add_parser(
         "signup",
@@ -340,6 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 #: Subcommand name -> handler. A dict rather than a chain of ifs, so adding a command is one line.
 _DISPATCH = {
+    "lib": commands.cmd_lib,
+    "library": commands.cmd_lib,
     "version": commands.cmd_version,
     "license": commands.cmd_license,
     "quick-start": commands.cmd_quickstart,
@@ -393,8 +410,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.server = getattr(args, "server", None) or getattr(args, "global_server", None)
     handler = _DISPATCH.get(args.command or "")
     if handler is None:
-        parser.print_help()
-        return 0
+        # No command. On a terminal that is somebody who has installed this and typed its name to
+        # see what it does, and the honest answer to that is the library: what they have, what it
+        # can do, and how to run it. Off a terminal — a pipe, a CI job, a Dockerfile — there is no
+        # screen to draw, so the help is still what comes back.
+        from siarapp.cli.screen import is_tty
+
+        if not is_tty():
+            parser.print_help()
+            return 0
+        handler = commands.cmd_lib
 
     # Banner first, so the licence prompt appears under the name of the thing asking.
     print_banner(__version__)

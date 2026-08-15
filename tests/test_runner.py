@@ -203,6 +203,31 @@ def test_resume_skips_what_is_already_written(corpus, stub, tmp_path):
     assert again["structures"] == 0  # nothing rescanned, so nothing recounted
 
 
+def test_one_recording_can_be_scanned_on_its_own(corpus, stub, tmp_path):
+    """A single file is a corpus of one, laid out as if its folder had been scanned.
+
+    Which is the point: somebody trying an algorithm on one recording before committing a survey
+    drive to it should be able to resume the whole folder on top of the result, and that only
+    works if the one file lands exactly where the folder run would have put it.
+    """
+    out = tmp_path / "out"
+    manifest = run_folder(stub, str(corpus / "loud.wav"), str(out), RunOptions())
+
+    assert manifest["files"] == 1
+    assert manifest["by_status"] == {"scanned": 1}
+    assert manifest["manifest"][0]["path"] == "loud.wav"
+    assert (out / "loud.wav").is_file()
+    assert (out / "loud.structures.json").is_file()
+
+
+def test_a_file_that_is_not_a_recording_is_the_same_error_as_an_empty_folder(tmp_path, stub):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("not a recording")
+
+    with pytest.raises(FileNotFoundError):
+        run_folder(stub, str(notes), str(tmp_path / "out"), RunOptions())
+
+
 def test_an_empty_folder_is_an_error_not_an_empty_output(tmp_path, stub):
     """Silently producing an empty output folder helps nobody — it is a typo, or MP3s."""
     (tmp_path / "nothing").mkdir()

@@ -350,7 +350,10 @@ def run_folder(
 
     Args:
         handle: A :class:`siarapp.loader.AlgorithmHandle`.
-        source_root: The folder of recordings.
+        source_root: The folder of recordings, or one recording. A single file is a corpus of
+            one, laid out under its own folder's name — so scanning one recording and scanning
+            the folder it sits in produce output folders of the same shape, and the second can
+            be resumed on top of the first.
         out_root: Where to write the output folder.
         options: See :class:`RunOptions`.
         progress: Called ``(done, total, result)`` after each recording.
@@ -398,6 +401,12 @@ def run_folder(
             f"no recordings under {source_root} — expected .wav or .flac "
             "(use --no-recursive if you meant only the top level)"
         )
+    # Everything downstream measures a recording against the folder it came from — the manifest's
+    # keys, the output folder's layout, the paths on every display. A single recording's folder is
+    # the one it sits in, so one file scanned on its own lands where the same file would have
+    # landed as part of its folder.
+    corpus_root = (source_root if os.path.isdir(source_root)
+                   else os.path.dirname(os.path.abspath(source_root)))
     if options.limit:
         files = files[: options.limit]
     # One stat per file, and every later question about size is answered from it: what the
@@ -423,7 +432,7 @@ def run_folder(
     if on_corpus is not None:
         on_corpus(len(files), audio_total, workers)
 
-    out = OutputFolder(out_root, source_root, link=options.link)
+    out = OutputFolder(out_root, corpus_root, link=options.link)
     started = time.time()
     # The oversized files are outcomes already, so they go in as rows before anything is scanned:
     # a manifest that simply omitted them would say the folder held fewer recordings than it does,
@@ -463,7 +472,7 @@ def run_folder(
         # anything in it to open rather than two seconds later.
         if time.time() >= next_flush_at:
             cost = _write_state(
-                out, handle, source_root, plan, options, results, started, workers,
+                out, handle, corpus_root, plan, options, results, started, workers,
                 progress_block(
                     started=started,
                     files_total=total,
@@ -483,7 +492,7 @@ def run_folder(
     # finished. Everything before it is stamped "running", which is exactly what an interrupted
     # scan should leave behind.
     manifest, _cost = _write_state(
-        out, handle, source_root, plan, options, results, started, workers,
+        out, handle, corpus_root, plan, options, results, started, workers,
         progress_block(
             started=started,
             files_total=total,

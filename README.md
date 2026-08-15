@@ -79,6 +79,78 @@ No IDent Dynamics account yet? `siar-app signup` makes one from here.
 Then open `~/survey-scan` in IDent Dynamics — **Open folder** in the app — and work through
 what came back.
 
+Or type `siar-app` on its own and do the same thing on one screen.
+
+## The library — `siar-app` with no command
+
+`siar-app` with no command opens the **library** (also `siar-app lib`): everything this machine
+can run, and the form that runs it.
+
+```
+siar-app  library   5 downloaded · 1 built here · 6 bots · 6 features
+────────────────────────────────────────────────────────────────────────────────────────────────
+   NAME                      WHERE FROM  VERSION  RUNS ON                  SIZE  WHEN         BOTS
+   all_structures            downloaded  1.0.0    linux-x86_64-cp313    1.0 MiB  2026-08-10      —
+ ▸ recall                    built here  0.1.0    this machine        140.6 KiB  2026-08-15      6
+────────────────────────────────────────────────────────────────────────────────────────────────
+   #  KIND       FITNESS  THRESHOLD  NODES  DEPTH  READS
+ ▸ 0  champion    0.9899    -0.3674     15      8  ratio_5350_5700hz_over_total, contrast_5700…
+   1  runner-up   0.9897          —     13      7  band_6750_7100hz, ratio_5350_5700hz_over_to…
+────────────────────────────────────────────────────────────────────────────────────────────────
+MODEL — recall
+  target recall   built 2026-08-15 21:05 by siar-build 0.1.0
+  corpus /home/you/survey-audio
+  audio  96000 Hz · fft 8192 · hop 2048 · band 5000-7800 Hz · 128 bins
+  result held-out 0.779 window / 0.859 recording · null 0.515 · parity ok
+  reads  ratio_5350_5700hz_over_total×6, contrast_5700_6050hz, peak_band_share×6
+────────────────────────────────────────────────────────────────────────────────────────────────
+RUN
+   scan      ~/survey-audio   412 recordings
+   write to  ~/survey-scan
+   parallel  auto — one worker per core, as many as this machine's memory will hold
+ ▸ ▶ start   run recall now
+────────────────────────────────────────────────────────────────────────────────────────────────
+ ↑↓ select   tab pane   enter choose/run   i scan   o write to   p parallel   R reload   q quit
+```
+
+Two kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches from
+IDent Dynamics. The ones **built here** are yours, from
+[`siar-build`](https://github.com/energy-master/siar-build) — read straight out of its own index
+at `~/.siar-build/models.db`, so a model you evolved last week is in the list the moment it is
+packaged, with the **bots** it came out of (the champion and the runners-up of that search), what
+each of them **reads**, and the run they came from. Nothing is copied and nothing is written back;
+delete that database and you lose a listing, not a model.
+
+A downloaded bundle has no bots to show, and says so. What is inside it is licensed separately and
+stays inside it — that split is the whole design, and the library does not pretend otherwise.
+
+**Paths are pointed at, not typed.** `i` and `o` open a browser over the folder that row is
+already pointing at: folders and recordings, <kbd>enter</kbd> to open one, <kbd>←</kbd> to go back
+up, letters to jump, and a row at the top that chooses the folder you are standing in. The output
+browser adds **new folder here…**, which takes a name — or a whole path, if you would rather type.
+The input may be **one recording** as readily as a folder, which is how you try a model on a single
+file before committing a survey drive to it.
+
+`parallel` is off or auto: one recording at a time, or every core this machine's memory will hold.
+Anything more precise is a flag on `siar-app run`.
+
+Then <kbd>enter</kbd> on **▶ start**, and the run takes the screen — the same live panel as
+[`siar-app run --tui`](#watching-a-long-run---tui), with the bar, the stage breakdown, a row per
+worker and what is being found. <kbd>Ctrl-Q</kbd> closes it and hands the library back, with the
+result on the form and the run in the history at the bottom of the screen.
+
+| Key | What it does |
+|---|---|
+| <kbd>↑</kbd> <kbd>↓</kbd> | move in the pane that has the focus |
+| <kbd>tab</kbd> | models → bots → run |
+| <kbd>enter</kbd> | open the browser on a path row, toggle `parallel`, or start the run |
+| `i` / `o` | choose what to scan / where to write |
+| `p` | parallel off or auto |
+| `R` | re-read the algorithm cache, siar-build's index and the run history |
+| `q` | quit |
+
+It needs a terminal. In a pipe, a log or a CI job `siar-app` prints its help as it always did.
+
 ---
 
 # Tutorial
@@ -451,11 +523,12 @@ With no folder argument it serves the most recent run from `siar-app runs`.
 
 ## Command reference
 
-Fourteen commands. Six of them (`version`, `quick-start`, `readme`, `installed`, `scan`, and
-`run --algorithm-path`) work without an account; the rest need a login.
+Fifteen commands. Seven of them (`lib`, `version`, `quick-start`, `readme`, `installed`, `scan`,
+and `run --algorithm-path`) work without an account; the rest need a login.
 
 | Command | What it does | Needs a login |
 |---|---|---|
+| [`lib`](#siar-app-lib) | browse what this machine can run, and scan from it — also what bare `siar-app` opens | no |
 | [`version`](#siar-app-version) | the package version and this machine's build tag | no |
 | [`license`](#siar-app-license) | show the licence, or accept it without a prompt | no |
 | [`quick-start`](#siar-app-quick-start) | open the illustrated quickstart in a browser | no |
@@ -464,7 +537,7 @@ Fourteen commands. Six of them (`version`, `quick-start`, `readme`, `installed`,
 | [`login`](#siar-app-login-username) | sign in and cache a bearer token | — |
 | [`logout`](#siar-app-logout) | forget the cached token on this machine | no |
 | [`whoami`](#siar-app-whoami) | who the cached token belongs to | reads the cache |
-| [`algorithms`](#siar-lib-algorithms) | the algorithms your account can download | yes |
+| [`algorithms`](#siar-app-algorithms) | the algorithms your account can download | yes |
 | [`installed`](#siar-app-installed) | the algorithms on **this machine**, and their versions | no |
 | [`scan`](#siar-app-scan-folder) | summarise a folder from headers alone | no |
 | [`run`](#siar-app-run-folder---out-dir) | scan a folder and build the output folder | first run only |
@@ -476,24 +549,43 @@ the subcommand — `siar-app --server … run` and `siar-app run --server …` b
 normally never pass it: the install you logged in to is remembered.
 
 `--help` on any command prints its flags; `siar-app --version` prints the version and exits.
-With no command at all, it prints the help and exits 0.
+With no command at all it opens [the library](#the-library--siar-app-with-no-command) — or, off a
+terminal, prints the help and exits 0.
 
 Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.5.0 · © Vixen Intelligence 2026
+siar-app 0.6.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
 exist to be piped into something, and a banner on stdout would make every one of them emit
 invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 
+### `siar-app lib`
+
+The library, described in full [above](#the-library--siar-app-with-no-command): every model on
+this machine — downloaded bundles and anything `siar-build` has packaged here — the bots and
+features behind each one, and a form that scans a folder or a single recording with it. `library`
+is accepted as an alias, and bare `siar-app` opens the same screen.
+
+No flags. Every choice it offers is one it can also show you the options for, which is the point
+of it. It needs a terminal, and off one it says so and points at `siar-app installed` and
+`siar-app run` instead.
+
+Nothing here is a second implementation of anything: the run is
+[`siar-app run --tui`](#watching-a-long-run---tui), the model list is what
+[`siar-app installed`](#siar-app-installed) reports, and the models built here are read
+**read-only** out of siar-build's own index (`~/.siar-build/models.db`, or
+`$SIAR_BUILD_HOME/models.db`). A run started from the library is the same row in the same history
+as one started from a shell.
+
 ### `siar-app version`
 
 ```bash
 $ siar-app version
-siar-app 0.5.0
+siar-app 0.6.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
@@ -683,6 +775,12 @@ The main run command. Runs one algorithm over every recording under `FOLDER` and
 folder holding the audio, one structures datafile per recording, and a lane thumbnail. `--out` is
 required and must not be the folder being accessed for input data.
 
+`FOLDER` may also be **a single recording** — `siar-app run ~/survey-audio/station-c/0410.wav
+-a all_structures -o /tmp/try` — which is how you try an algorithm on one file before committing a
+survey drive to it. The output folder is laid out exactly as it would have been had you scanned
+the folder that file sits in, so `--resume` over the whole folder later picks up where it left
+off.
+
 **Choosing the algorithm**
 
 | Flag | Meaning |
@@ -760,7 +858,7 @@ WHEN                  ALGORITHM       FILES  FOUND  OUTPUT
 ### `siar-app serve [DIR]`
 
 Serve one output folder read-only over HTTP so it can be browsed from another machine through an
-ssh tunnel — see [the tutorial section](#6-look-at-a-scan-that-is-on-another-machine-siar-app-serve)
+ssh tunnel — see [the tutorial section](#6-look-at-a-scan-that-is-on-another-machine-siar-app-serve-hpc)
 for what the page shows and why it sends a picture rather than the audio. `DIR` defaults to the most
 recent run in `siar-app runs`.
 
@@ -823,6 +921,7 @@ Everything lives under one directory.
 | `SIAR_APP_PASSWORD` | read by `login` instead of prompting |
 | `SIAR_APP_ACCEPT_LICENSE` | accept the licence without a prompt (containers, CI) |
 | `SIAR_APP_NO_BANNER` | suppress the two-line banner on stderr |
+| `SIAR_BUILD_HOME` | where the library looks for `siar-build`'s index (default `~/.siar-build`) |
 
 ```
 ~/.siar-app/
@@ -831,6 +930,10 @@ Everything lives under one directory.
   runs.json                     what `siar-app runs` lists
   algorithms/<name>/<platform>/ unpacked bundles, one tree per build
 ```
+
+The one file outside that directory is `~/.siar-build/models.db`, and it belongs to `siar-build`.
+The library reads it and never writes it: no row is added, and the file is never created by being
+looked for.
 
 
 **Exit codes.** 0 on success, 1 on a handled failure — a bad folder, an expired token, a run

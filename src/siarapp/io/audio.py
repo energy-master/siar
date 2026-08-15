@@ -115,13 +115,17 @@ def find_recordings(root: str, *, recursive: bool = True) -> list[str]:
     lane order should agree between runs and between machines, and directory order does not.
 
     Args:
-        root: Folder to walk.
+        root: Folder to walk, or a single recording — which comes back as a corpus of one, so
+            that everything above this can be pointed at one file without knowing it is not a
+            folder.
         recursive: Descend into subdirectories.
 
     Returns:
         Absolute paths.
     """
     root = os.path.abspath(root)
+    if os.path.isfile(root):
+        return [root] if is_audio(root) else []
     if not recursive:
         try:
             names = os.listdir(root)

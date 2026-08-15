@@ -42,6 +42,7 @@ from siarapp.cli.format import (
     named_recording,
     share,
     size_and_length,
+    stamp,
     stage_tag,
 )
 from siarapp.cli.progress import Passage, Throughput
@@ -82,6 +83,7 @@ __all__ = [
     "cmd_algorithms",
     "cmd_feedback",
     "cmd_installed",
+    "cmd_lib",
     "cmd_license",
     "cmd_login",
     "cmd_logout",
@@ -93,6 +95,8 @@ __all__ = [
     "cmd_signup",
     "cmd_version",
     "cmd_whoami",
+    "metric_rows",
+    "perform_run",
 ]
 
 
@@ -578,7 +582,7 @@ def cmd_installed(args: Namespace) -> int:
             r["version"],
             r["platform"],
             human_bytes(r["bytes"]),
-            _when(r["downloaded_at"]),
+            stamp(r["downloaded_at"]),
             "yes" if r["runnable"] else "no",
         ]
         for r in rows
@@ -617,11 +621,16 @@ def _version_key(text: str) -> tuple:
     return tuple(int(p) for p in parts[:4]) or (0,)
 
 
-def _when(epoch: int) -> str:
-    """A download timestamp, local time, to the minute."""
-    if not epoch:
-        return "—"
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch))
+def cmd_lib(args: Namespace) -> int:
+    """Open the library: what this machine can run, and the form that runs it.
+
+    A thin wrapper on purpose. The screen is :mod:`siarapp.cli.library_tui`, imported here rather
+    than at the top of this module because it pulls in the terminal layer and siar-build's index,
+    and ``siar-app version`` should not pay for either.
+    """
+    from siarapp.cli import library_tui
+
+    return library_tui.run(args)
 
 
 # -- feedback ---------------------------------------------------------------------------------
@@ -738,10 +747,10 @@ def _print_my_feedback(client) -> int:
 
 
 def cmd_run(args: Namespace) -> int:
-    """Scan a folder and build the output folder."""
+    """Scan a folder — or one recording — and build the output folder."""
     source = os.path.abspath(os.path.expanduser(args.folder))
-    if not os.path.isdir(source):
-        return _err(f"{args.folder} is not a folder")
+    if not os.path.exists(source):
+        return _err(f"{args.folder} is not a folder or a recording")
 
     out_root = os.path.abspath(os.path.expanduser(args.out))
     if os.path.abspath(out_root) == source:
@@ -780,17 +789,50 @@ def cmd_run(args: Namespace) -> int:
     print(f"scanning   {source}")
     print(f"output     {out_root}")
 
-    started = time.time()
     reporter = _reporter(args, handle.slug, source, out_root)
+    manifest, failure = perform_run(handle, source, out_root, options, reporter,
+                                    quiet=args.quiet)
+    if failure:
+        return _err(failure)
+
+    _print_summary(manifest, out_root)
+    return 1 if manifest["by_status"].get("error") else 0
+
+
+def perform_run(handle: Any, source: str, out_root: str, options: RunOptions, reporter,
+                *, quiet: bool = False) -> tuple[dict, str]:
+    """Run one scan behind a live display, and record it in this machine's history.
+
+    Both things that start a scan come through here — ``siar-app run`` and the library screen —
+    because the order of the four steps around :func:`~siarapp.runner.run_folder` is not
+    obvious and getting it wrong is invisible until the run that fails. The display has to be
+    closed before a failure is printed, the panel has to be held before it is closed, and the
+    history has to be written whatever the display did.
+
+    Args:
+        handle: The loaded :class:`~siarapp.loader.AlgorithmHandle`.
+        source: Folder of recordings, or one recording.
+        out_root: Output folder to build.
+        options: The run options.
+        reporter: A live display — any of the three, or anything carrying the same callbacks.
+        quiet: Report nothing per file. The display is still closed, so a caller need not care.
+
+    Returns:
+        ``(manifest, failure)``. Exactly one of them is meaningful: an empty ``failure`` means
+        the manifest is the run's, and a non-empty one means the run did not finish and the
+        string is what to tell the user. Returned rather than raised because the caller may be a
+        command about to exit or a screen about to draw the next frame.
+    """
+    manifest: dict = {}
     failure = ""
     try:
         manifest = run_folder(
             handle, source, out_root, options,
-            progress=None if args.quiet else reporter.on_result,
-            on_start=None if args.quiet else reporter.on_start,
-            on_corpus=None if args.quiet else reporter.on_corpus,
-            on_idle=None if args.quiet else reporter.on_idle,
-            on_stage=None if args.quiet else reporter.on_stage,
+            progress=None if quiet else reporter.on_result,
+            on_start=None if quiet else reporter.on_start,
+            on_corpus=None if quiet else reporter.on_corpus,
+            on_idle=None if quiet else reporter.on_idle,
+            on_stage=None if quiet else reporter.on_stage,
             # A display that owns the screen would draw over a warning printed from under it, so it
             # is offered the warning instead and decides where it goes.
             warn=getattr(reporter, "note", None) or _warn,
@@ -799,7 +841,7 @@ def cmd_run(args: Namespace) -> int:
         # display that owns the screen keeps it, with the closing metrics in it, until dismissed.
         hold = getattr(reporter, "hold", None)
         if hold is not None:
-            hold(_metric_rows(manifest))
+            hold(metric_rows(manifest))
     except (FileNotFoundError, ValueError, ScannerError) as e:
         # Held rather than printed here: an `except` body runs *before* the `finally`, so a
         # message printed from one lands in the middle of a live display that is about to be
@@ -811,9 +853,8 @@ def cmd_run(args: Namespace) -> int:
         reporter.close()
 
     if failure:
-        return _err(failure)
+        return {}, failure
 
-    _print_summary(manifest, out_root)
     record_run({
         "at": manifest["started_at"],
         "algorithm": handle.slug,
@@ -821,7 +862,10 @@ def cmd_run(args: Namespace) -> int:
         "out": out_root,
         "files": manifest["files"],
         "structures": manifest["structures"],
-        "elapsed_sec": round(time.time() - started, 2),
+        # The run's own wall time, off the manifest, rather than a clock read here: a held panel
+        # waits for a keypress before this line is reached, and a run recorded as having taken
+        # four minutes because somebody went for coffee is a row that lies to the next reader.
+        "elapsed_sec": float(manifest.get("elapsed_sec") or 0.0),
         # Recorded because it is the difference between two otherwise identical rows: the same
         # corpus and the same algorithm, four hours apart or forty minutes.
         "workers": int(manifest.get("workers", 1)),
@@ -836,7 +880,7 @@ def cmd_run(args: Namespace) -> int:
         # scan before it can draw a stage rather than a file.
         "phases": dict(manifest.get("phases") or {}),
     })
-    return 1 if manifest["by_status"].get("error") else 0
+    return manifest, ""
 
 
 def _audio_scanned(manifest: dict) -> float:
@@ -1411,7 +1455,7 @@ class WorkerPanel:
 
 
 
-def _metric_rows(manifest: dict) -> list[list[str]]:
+def metric_rows(manifest: dict) -> list[list[str]]:
     """The run's metrics, as table rows: how much was scanned, where the time went, what came out.
 
     Args:
@@ -1514,7 +1558,7 @@ def _print_summary(manifest: dict, out_root: str) -> None:
         print(f"Nothing to do — all {by_status['skipped']} file(s) were already scanned.")
         print("Drop --resume, or delete the output folder, to scan them again.")
     else:
-        print(render_table(["METRIC", "VALUE", "SHARE"], _metric_rows(manifest),
+        print(render_table(["METRIC", "VALUE", "SHARE"], metric_rows(manifest),
                            align=["<", ">", ">"]))
         print()
         if manifest["shapes"]:

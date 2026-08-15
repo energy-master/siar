@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 
 from siarapp.io.performance import PHASES
 
@@ -45,6 +46,7 @@ __all__ = [
     "set_colour",
     "share",
     "size_and_length",
+    "stamp",
     "stage_tag",
     "paint",
     "visible_len",
@@ -309,6 +311,25 @@ def stage_tag(stage: str) -> str:
         The tag, or the same width in spaces when there is no stage to name.
     """
     return f"[{stage}]".ljust(_STAGE_WIDTH) if stage else " " * _STAGE_WIDTH
+
+
+def stamp(epoch: int | float) -> str:
+    """A moment in local time, to the minute — how every listing writes "when".
+
+    Local time rather than UTC: this is a stamp on something that happened on *this* machine, and
+    the reader is sitting at it. To the minute because the second a bundle finished unpacking has
+    never been the answer to anything.
+
+    Args:
+        epoch: Seconds since the epoch, or ``0`` when it is not known.
+
+    Returns:
+        ``"YYYY-MM-DD HH:MM"``, or ``"—"`` for an unknown moment — which is a statement, and
+        ``"1970-01-01 01:00"`` is a lie.
+    """
+    if not epoch:
+        return "—"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(epoch)))
 
 
 def share(seconds: float, total: float) -> str:
