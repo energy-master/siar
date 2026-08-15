@@ -874,8 +874,13 @@ def perform_run(handle: Any, source: str, out_root: str, options: RunOptions, re
         # Kept as a pair rather than as their quotient so a later reader can see the weight
         # behind the number — thirty seconds of audio is not evidence of much.
         "audio_sec": round(_audio_scanned(manifest), 2),
+        # Four decimals, not two: this is the numerator of the next run's first bars, and a trial
+        # over a handful of clips spends milliseconds per recording. Rounded to a hundredth, that
+        # run records "no time at all", :func:`~siarapp.config.recent_cost` divides by it and
+        # comes back with nothing, and the next run starts as blind as if this one had never
+        # happened — which is exactly the run whose bars this exists to draw.
         "worker_sec": round(sum(float(r.get("elapsed_sec") or 0.0)
-                                for r in manifest["manifest"]), 2),
+                                for r in manifest["manifest"]), 4),
         # And how that time divided, because a bar has to know that a recording is nine tenths
         # scan before it can draw a stage rather than a file.
         "phases": dict(manifest.get("phases") or {}),
@@ -931,7 +936,10 @@ def _reporter(args: Namespace, slug: str, source: str = "", out_root: str = ""):
     if args.tui:
         if sys.stdout.isatty():
             return TuiDisplay(slug, workers=args.parallel if args.parallel > 0 else 1,
-                              source=source, out=out_root, prior=Throughput(rate, shares))
+                              source=source, out=out_root, prior=Throughput(rate, shares),
+                              # So a recording opened from the panel is pictured off the channel
+                              # the run actually scanned, not off a downmix nothing was scored on.
+                              channel=getattr(args, "channel", "mix"))
         _warn("--tui needs a terminal; reporting one line per recording instead")
     if args.parallel != 1:
         return WorkerPanel(Throughput(rate, shares))

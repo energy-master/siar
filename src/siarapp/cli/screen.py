@@ -37,11 +37,15 @@ except ImportError:  # pragma: no cover - Windows
     tty = None
 
 __all__ = [
+    "capture_keys",
+    "click_at",
+    "decode_csi",
     "draw",
     "enter",
     "is_tty",
     "leave",
     "read_key",
+    "release_keys",
     "screen",
     "size",
 ]
@@ -70,6 +74,25 @@ _ESCAPE_GRACE_SEC = 0.05
 #: What the final byte of a CSI sequence means. Anything else is swallowed rather than handed on,
 #: because a function key arriving as a stray letter would type into whatever field is open.
 _CSI = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end"}
+
+#: Mouse reporting: button presses and releases only, in SGR form. Motion is deliberately not
+#: asked for — nothing here reacts to a mouse moving, and a terminal that reports every pixel of
+#: it over an ssh link to a vessel is spending the link on nothing.
+#:
+#: It is off by default and turned on only where a screen has something to click. While it is on,
+#: the terminal's own text selection needs Shift held, which is a real cost to anyone reading over
+#: ssh — so screens that offer no click do not pay it.
+_MOUSE_ON = "\033[?1000h\033[?1006h"
+_MOUSE_OFF = "\033[?1006l\033[?1000l"
+
+#: Longest CSI sequence read before giving up. An SGR mouse report on a very large terminal is
+#: about fifteen characters; anything past this is a terminal saying something this does not speak.
+_CSI_MAX = 32
+
+#: Mouse button bits, from the SGR report's first parameter.
+_WHEEL = 64
+_MOTION = 32
+_BUTTON = 3
 
 
 def is_tty() -> bool:
@@ -105,52 +128,85 @@ def size(default: tuple[int, int] = (100, 30)) -> tuple[int, int]:
     return max(_MIN_COLUMNS, int(columns)), max(_MIN_ROWS, int(rows))
 
 
-def enter() -> None:
+def enter(*, mouse: bool = False) -> None:
     """Take the alternate screen buffer, blank it, and hide the cursor.
 
     Separate from :func:`screen` because the library hands the screen to the run panel and takes
     it back: :mod:`siarapp.cli.tui` enters and leaves the buffer on its own, so what the library
     needs afterwards is exactly this, and not a second context manager wrapped around the first.
+
+    Args:
+        mouse: Also ask the terminal to report clicks (see :data:`_MOUSE_ON`). Only for a screen
+            that has something to click: while it is on, selecting text needs Shift held.
     """
-    sys.stdout.write(_ALT_ON + HIDE_CURSOR + _CLEAR + _HOME)
+    sys.stdout.write(_ALT_ON + HIDE_CURSOR + _CLEAR + _HOME + (_MOUSE_ON if mouse else ""))
     sys.stdout.flush()
 
 
 def leave() -> None:
-    """Give the buffer back and show the cursor. The inverse of :func:`enter`."""
-    sys.stdout.write(SHOW_CURSOR + _ALT_OFF)
+    """Give the buffer back and show the cursor. The inverse of :func:`enter`.
+
+    Mouse reporting is turned off whether or not it was turned on: a terminal left reporting
+    clicks into a shell prompt is a terminal the reader has to close, and the sequence costs
+    nothing when it was never enabled.
+    """
+    sys.stdout.write(_MOUSE_OFF + SHOW_CURSOR + _ALT_OFF)
     sys.stdout.flush()
 
 
+def capture_keys():
+    """Put the terminal in cbreak mode so keys arrive one at a time, and return what it was.
+
+    ``IXON`` is cleared with it. Ctrl-S and Ctrl-Q are flow control to the line discipline, which
+    would swallow them before any of this saw them, and a reader who presses Ctrl-S out of habit
+    would find a frozen screen and nothing to press to fix it. Interrupts are left enabled, so
+    Ctrl-C stops the program the way it does everywhere else.
+
+    Returns:
+        The saved terminal attributes, to be handed back to :func:`release_keys`, or ``None``
+        when there is no terminal to configure — off a tty, and on Windows.
+    """
+    if termios is None or tty is None:
+        return None
+    try:
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        mode = termios.tcgetattr(fd)
+        mode[0] &= ~termios.IXON
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
+        return saved
+    except (AttributeError, ValueError, OSError, termios.error):
+        return None
+
+
+def release_keys(saved) -> None:
+    """Put the terminal back the way :func:`capture_keys` found it. ``None`` is a no-op."""
+    if saved is None or termios is None:
+        return
+    try:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+    except (AttributeError, ValueError, OSError, termios.error):  # pragma: no cover
+        pass
+
+
 @contextmanager
-def screen() -> Iterator[None]:
+def screen(*, mouse: bool = False) -> Iterator[None]:
     """Hold the alternate screen in cbreak mode for the body of the ``with``.
 
     The restore runs under ``finally``, in the reverse order of the setup, so an exception inside
     the interface still leaves a usable terminal — the traceback then prints onto the normal
     buffer, where it can be read and scrolled.
 
-    ``IXON`` is cleared for the duration. Ctrl-S and Ctrl-Q are flow control to the line
-    discipline, which would swallow them before any of this saw them, and a user who presses
-    Ctrl-S out of habit would find a frozen screen and nothing to press to fix it. Interrupts are
-    left enabled, so Ctrl-C stops the program the way it does everywhere else.
+    Args:
+        mouse: Ask for click reporting; see :func:`enter`.
     """
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd) if termios is not None else None
-    enter()
+    saved = capture_keys()
+    enter(mouse=mouse)
     try:
-        if tty is not None and termios is not None:
-            tty.setcbreak(fd)
-            mode = termios.tcgetattr(fd)
-            mode[0] &= ~termios.IXON
-            termios.tcsetattr(fd, termios.TCSANOW, mode)
         yield
     finally:
-        if saved is not None and termios is not None:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            except (OSError, termios.error):  # pragma: no cover - terminal already gone
-                pass
+        release_keys(saved)
         leave()
 
 
@@ -203,6 +259,61 @@ def _read_char(fd: int) -> str:
     return (first + (os.read(fd, extra) if extra else b"")).decode("utf-8", "replace")
 
 
+def decode_csi(sequence: str) -> str:
+    """What a CSI sequence means, as a key name. Pure — everything after ``ESC [``.
+
+    Args:
+        sequence: The parameter bytes and the final byte, e.g. ``"A"`` for Up or
+            ``"<0;42;7M"`` for a left click at column 42, row 7.
+
+    Returns:
+        A key name, a click token, or ``""`` for a sequence nothing here reacts to — a mouse
+        release, a wheel tilt, a function key. Swallowed rather than handed on, because a
+        sequence delivered as stray letters would type into whatever field is open.
+
+    Note:
+        A click comes back as ``"click:<row>:<column>"``, **zero-based**, because what a caller
+        does with it is index the line it drew there. :func:`click_at` parses it, so no caller
+        has to know that.
+    """
+    if not sequence:
+        return ""
+    final, params = sequence[-1], sequence[:-1]
+    if params.startswith("<") and final in ("M", "m"):
+        try:
+            button, column, row = (int(part) for part in params[1:].split(";"))
+        except ValueError:
+            return ""
+        if button & _WHEEL:
+            # The wheel reports as a button press with the wheel bit set; up is 0, down is 1.
+            # Scrolling a list is what every reader will try, and it costs one line to honour.
+            return "down" if button & _BUTTON else "up"
+        if button & _MOTION or final != "M" or (button & _BUTTON) != 0:
+            # Motion, a release, or a button that is not the left one. A release always follows a
+            # press, so acting on both would open everything twice.
+            return ""
+        return f"click:{max(0, row - 1)}:{max(0, column - 1)}"
+    if final == "~":
+        # Home, Insert, Delete, a function key: parameterised, and none of them mean anything
+        # here. An arrow with a modifier (``ESC [ 1 ; 2 A``) still arrives as its arrow.
+        return ""
+    return _CSI.get(final, "")
+
+
+def click_at(key: str) -> tuple[int, int] | None:
+    """The ``(row, column)`` of a click token, or ``None`` if that is not what this key is.
+
+    Zero-based, so the row indexes the list of lines the caller last drew.
+    """
+    if not key.startswith("click:"):
+        return None
+    try:
+        _tag, row, column = key.split(":")
+        return int(row), int(column)
+    except ValueError:  # pragma: no cover - only reachable from a hand-made token
+        return None
+
+
 def read_key(timeout: float = 0.0) -> str:
     """One keystroke, or ``""`` if none arrived within ``timeout`` seconds.
 
@@ -231,13 +342,16 @@ def read_key(timeout: float = 0.0) -> str:
         if _read_char(fd) != "[":
             return "escape"
         # Read to the sequence's final byte (0x40-0x7E) so a parameterised key such as Home as
-        # ``ESC [ 1 ~`` cannot leave its tail behind to be read as typing.
-        final = ""
-        for _ in range(8):
-            final = _read_char(fd)
-            if not final or "@" <= final <= "~":
+        # ``ESC [ 1 ~``, or a mouse report, cannot leave its tail behind to be read as typing.
+        sequence = ""
+        for _ in range(_CSI_MAX):
+            piece = _read_char(fd)
+            if not piece:
                 break
-        return _CSI.get(final, "")
+            sequence += piece
+            if "@" <= piece <= "~":
+                break
+        return decode_csi(sequence)
     if char in ("\r", "\n"):
         return "enter"
     if char in ("\x7f", "\b"):

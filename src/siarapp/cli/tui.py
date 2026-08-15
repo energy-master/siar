@@ -11,6 +11,11 @@ answers the questions asked while a survey is *running* and nowhere else:
   hours and found nothing is usually the wrong algorithm rather than a quiet ocean.
 * Is anything stuck, and did anything fail? A fixed row per worker, and the failures kept on
   screen instead of scrolling past at three in the morning.
+* **Is it finding the right thing?** Click a finished recording — or pick it with the arrow keys
+  and press enter — and its spectrogram opens in the panel with every structure outlined on it
+  (:mod:`siarapp.cli.picture`). That is the question a survey asks at recording forty, and the
+  answer used to mean stopping the run, carrying the folder to a machine with a browser and
+  opening it there. The run keeps going underneath.
 
 **It takes the screen.** The run gets the alternate screen buffer — the one ``vim`` and ``less``
 use — cleared, and the frame is drawn to the terminal's full width and full height, repainted from
@@ -40,22 +45,14 @@ import threading
 import time
 from collections import deque
 
-try:  # POSIX only, and only needed to read one keystroke at the end of a run.
-    import termios
-    import tty
-except ImportError:  # pragma: no cover - Windows
-    termios = None
-    tty = None
-
+from siarapp.cli import screen
 from siarapp.cli.format import (
     BAR_CAP,
     BOLD,
     CYAN,
     DIM,
     GREEN,
-    HIDE_CURSOR,
     RED,
-    SHOW_CURSOR,
     YELLOW,
     clock,
     cost,
@@ -69,6 +66,7 @@ from siarapp.cli.format import (
     stage_tag,
     visible_len,
 )
+from siarapp.cli.picture import load_picture, panel_size, render_picture
 from siarapp.cli.progress import Passage, Throughput
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
 
@@ -99,27 +97,34 @@ _MINI_BAR = 10
 _TWO_COLUMN_MIN = 96
 
 #: What dismisses the finished panel: Ctrl-Q as asked for, and ``q`` because someone will try it.
-_QUIT_KEYS = (b"\x11", b"q", b"Q")
+_QUIT_KEYS = ("\x11", "q", "Q")
 
-#: Drawn on the last line when a run has less history than screen. True, and the thing worth
-#: knowing while watching a scan that might need stopping.
-_FOOTER = "Ctrl-C leaves a usable folder — --resume picks it up where it stopped."
+#: What opens the picture of the selected recording, and what closes it again.
+_OPEN_KEYS = ("enter", "space")
+_CLOSE_KEYS = ("escape", "q", "Q", "\x11")
+
+#: Drawn on the last line when a run has less history than screen. True, and the two things worth
+#: knowing while watching a scan: how to stop it, and that the recordings it has finished can be
+#: looked at without stopping it.
+_FOOTER = ("Ctrl-C leaves a usable folder — --resume picks it up.   "
+           "↑↓ or click a finished recording, enter opens it.")
 
 #: And once it has finished. The panel is worth nothing if the reader cannot tell it is waiting for
 #: them rather than still working.
-_HELD_FOOTER = "Run complete — Ctrl-Q (or q) to close this panel."
+_HELD_FOOTER = ("Run complete — ↑↓ or click a recording and press enter to see it, "
+                "Ctrl-Q (or q) to close this panel.")
+
+#: The title over the completions, which is also where the reader is told they can be opened.
+_RECENT_TITLE = "just finished — enter or click to see the spectrogram"
 
 #: Shortest terminal the frame will draw itself into. Below this it is drawn at this height anyway
 #: and the terminal scrolls it: a window eight lines tall cannot show a run, and pretending
 #: otherwise would mean deciding which of the two rules to leave out.
 _MIN_HEIGHT = 10
 
-#: The alternate screen buffer — what ``vim`` and ``less`` use. Entering it gives the run a blank
-#: screen of its own to own completely; leaving it puts the shell's scrollback back exactly as it
-#: was, so the closing summary prints under the command that started the run rather than under the
-#: wreckage of a panel.
-_ENTER_SCREEN = "\033[?1049h\033[H\033[2J"
-_LEAVE_SCREEN = "\033[?1049l"
+#: How long the drawing thread waits for a keystroke between frames. The wait *is* the tick: a key
+#: that arrives redraws immediately, and one that does not costs nothing.
+_KEY_WAIT_SEC = _TICK_SEC
 
 
 class TuiDisplay:
@@ -138,13 +143,36 @@ class TuiDisplay:
     """
 
     def __init__(self, algorithm: str = "", workers: int = 1, source: str = "",
-                 out: str = "", prior: Throughput | None = None) -> None:
+                 out: str = "", prior: Throughput | None = None, channel: str = "mix") -> None:
         self._algorithm = algorithm or "scan"
         self._where = f"{source}  →  {out}" if source and out else (source or out)
+        self._out_root = out
+        self._channel = channel or "mix"
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._hidden = False
+        # The terminal's own settings, while this display has them, and the event the drawing
+        # thread sets when the reader asks to close a finished run.
+        self._keys = None
+        self._quit = threading.Event()
+        # What the reader has picked out of the completions, by path rather than by position: new
+        # recordings land on top of that list while it is being read, and an index would quietly
+        # come to mean a different recording every time one did.
+        self._picked = ""
+        # The recording whose picture is on the screen, and the frame drawn for it — cached
+        # against its size, because a picture is read off the disk and the screen repaints four
+        # times a second.
+        self._showing = ""
+        self._picture = None
+        self._picture_key: tuple = ()
+        self._drawn_key: tuple = ()
+        self._picture_lines: list[str] = []
+        # Whether the open picture is zoomed to the band its structures are in. Sticky across
+        # recordings: somebody looking at a band-limited model wants every one of them that way.
+        self._zoomed = False
+        # Frame line -> the recording drawn on it, rebuilt every render. What a click lands on.
+        self._clicks: dict[int, str] = {}
 
         self._started = time.time()
         self._workers = max(1, workers)
@@ -190,7 +218,10 @@ class TuiDisplay:
             self._files_total = files
             self._audio_total = audio_sec
             self._started = time.time()
-        sys.stdout.write(_ENTER_SCREEN + HIDE_CURSOR)
+        # Clicks are asked for because this panel has something to click: a finished recording,
+        # which opens as a picture. The keys come with them — the same thread reads both.
+        screen.enter(mouse=True)
+        self._keys = screen.capture_keys()
         self._hidden = True
         self._stop.clear()
         self._thread = threading.Thread(target=self._tick, daemon=True)
@@ -291,48 +322,11 @@ class TuiDisplay:
             self._metrics = [list(row) for row in metrics]
             self._finished = True
             self._ended = time.time()
-            self._draw(self._render(self._ended))
-        self._wait_for_quit()
-
-    def _wait_for_quit(self) -> None:
-        """Block until Ctrl-Q, ``q``, or end of input.
-
-        The terminal is put in cbreak mode so a single keystroke arrives without a newline, and
-        ``IXON`` is cleared for the duration: Ctrl-Q is XON to the line discipline, which would
-        swallow it as flow control before this ever saw it. Interrupts are left enabled, so Ctrl-C
-        still stops the program the way it does everywhere else.
-
-        Returns immediately when stdin is not a terminal — a scripted run has nobody to press a
-        key, and waiting forever for one would hang a survey in a cron job.
-        """
-        try:
-            if not sys.stdin.isatty():
-                return
-        except (AttributeError, ValueError):
+        if self._keys is None:
+            # No terminal to read a keypress from — a scripted run, a cron job. The panel has
+            # been drawn; holding it open for a key nobody can press would hang the survey.
             return
-        if termios is None or tty is None:
-            # No POSIX terminal control (Windows): the panel has been drawn, and holding the run
-            # open with no way to read a keypress would be worse than closing it.
-            return
-
-        fd = sys.stdin.fileno()
-        saved = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            mode = termios.tcgetattr(fd)
-            mode[0] &= ~termios.IXON
-            termios.tcsetattr(fd, termios.TCSANOW, mode)
-            while True:
-                key = sys.stdin.buffer.read(1)
-                if not key or key in _QUIT_KEYS:
-                    return
-        except (OSError, termios.error):
-            return
-        finally:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            except (OSError, termios.error):
-                pass
+        self._quit.wait()
 
     def close(self) -> None:
         """Stop drawing, give the terminal back, and leave the problems in the scrollback."""
@@ -340,9 +334,10 @@ class TuiDisplay:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+        screen.release_keys(self._keys)
+        self._keys = None
         if self._hidden:
-            sys.stdout.write(SHOW_CURSOR + _LEAVE_SCREEN)
-            sys.stdout.flush()
+            screen.leave()
             self._hidden = False
         for kind, text in self._problems:
             print(f"{kind}: {text}", file=sys.stderr)
@@ -357,10 +352,146 @@ class TuiDisplay:
             self._workers = len(self._lanes)
 
     def _tick(self) -> None:
-        while not self._stop.wait(_TICK_SEC):
+        """Draw the frame, then wait for a keystroke — which is also the gap between frames.
+
+        One thread does both. The scan itself is on the main thread and cannot stop to read a
+        key, and two threads reading one terminal would each get half of every arrow.
+        """
+        while not self._stop.is_set():
             with self._lock:
                 # Redrawn even while held, so a window resized after the run still looks right.
-                self._draw(self._render(time.time()))
+                self._draw(self._frame())
+            if self._keys is None:
+                # Nothing to read keys from: draw on a timer and let the run end by itself.
+                self._stop.wait(_TICK_SEC)
+                continue
+            try:
+                key = screen.read_key(_KEY_WAIT_SEC)
+            except KeyboardInterrupt:  # pragma: no cover - Ctrl-C belongs to the main thread
+                continue
+            if key:
+                self._handle(key)
+
+    def _frame(self) -> list[str]:
+        """What to draw now: a recording's picture if one is open, else the run."""
+        if self._showing:
+            return self._picture_frame(self._showing)
+        return self._render(time.time())
+
+    # -- the keys --------------------------------------------------------------------------
+
+    def _handle(self, key: str) -> None:
+        """One keystroke or click. Called on the drawing thread, without the lock.
+
+        A run is not a form: the only thing to do while one is going is look at what it has
+        already finished, so the whole of this is picking a recording out of the completions and
+        opening it — plus the one key that closes a finished panel.
+        """
+        if self._showing:
+            if key in _CLOSE_KEYS:
+                with self._lock:
+                    self._showing = ""
+            elif key in ("left", "up", "k"):
+                self._step(1)      # up the list is *newer*, and the list is newest-first
+            elif key in ("right", "down", "j"):
+                self._step(-1)
+            elif key in ("z", "Z"):
+                with self._lock:
+                    self._zoomed = not self._zoomed
+            return
+
+        spot = screen.click_at(key)
+        if spot is not None:
+            with self._lock:
+                picked = self._clicks.get(spot[0], "")
+            if picked:
+                self._open(picked)
+            return
+
+        if key in ("up", "k"):
+            self._move(-1)
+        elif key in ("down", "j"):
+            self._move(1)
+        elif key in _OPEN_KEYS:
+            with self._lock:
+                picked = self._picked or (self._recent[0][1] if self._recent else "")
+            if picked:
+                self._open(picked)
+        elif key in _QUIT_KEYS and self._finished:
+            # Only once the run is over. During one, ``q`` means nothing on purpose — the way to
+            # stop a scan is Ctrl-C, and a key that sometimes ends a survey is a key nobody
+            # presses twice.
+            self._quit.set()
+
+    def _paths(self) -> list[str]:
+        """The completions on screen, newest first. Caller need not hold the lock."""
+        with self._lock:
+            return [rel_path for _mark, rel_path, _tail in self._recent]
+
+    def _move(self, delta: int) -> None:
+        """Move the pick down (``+1``) or up (``-1``) the completions list."""
+        paths = self._paths()
+        if not paths:
+            return
+        try:
+            index = paths.index(self._picked)
+        except ValueError:
+            index = 0 if delta > 0 else len(paths) - 1
+        else:
+            index = max(0, min(len(paths) - 1, index + delta))
+        with self._lock:
+            self._picked = paths[index]
+
+    def _step(self, delta: int) -> None:
+        """Move to the next recording *while its picture is open*, and open that one instead."""
+        paths = self._paths()
+        if not paths:
+            return
+        try:
+            index = paths.index(self._showing)
+        except ValueError:
+            return
+        moved = max(0, min(len(paths) - 1, index - delta))
+        if moved != index:
+            self._open(paths[moved])
+
+    def _open(self, rel_path: str) -> None:
+        """Show one recording's picture, and remember it as the pick."""
+        with self._lock:
+            self._picked = rel_path
+            self._showing = rel_path
+
+    def _picture_frame(self, rel_path: str) -> list[str]:
+        """The open recording's panel, read from the output folder and cached twice over.
+
+        Read here — on the drawing thread — rather than when the key was pressed, because it is a
+        seek-and-transform of a recording that may be an hour long and the run must not stop for
+        it. Two caches, because the two halves cost wildly different amounts: the recording is
+        re-read only when another one is opened or the window is resized, while the frame is
+        redrawn when the zoom changes or when the run finishing another file moves this one's
+        position in the list.
+        """
+        columns, height = shutil.get_terminal_size((100, 24))
+        width = max(40, columns)
+        rows = max(_MIN_HEIGHT, height)
+
+        key = (rel_path, width, rows)
+        if key != self._picture_key:
+            cols, picture_rows = panel_size(width, rows)
+            self._picture = load_picture(self._out_root, rel_path, cols=cols, rows=picture_rows,
+                                         channel=self._channel)
+            self._picture_key = key
+            self._drawn_key = ()
+
+        paths = [path for _mark, path, _tail in self._recent]
+        position = f"{paths.index(rel_path) + 1} of {len(paths)}" if rel_path in paths else ""
+        band = self._picture.band() if self._zoomed else None
+        drawn = (key, position, band)
+        if drawn != self._drawn_key:
+            self._picture_lines = render_picture(self._picture, width, rows,
+                                                 position=position, band=band)
+            self._drawn_key = drawn
+        return self._picture_lines
 
     def _draw(self, lines: list[str]) -> None:
         """Repaint the screen from the top left. Caller holds the lock.
@@ -470,10 +601,16 @@ class TuiDisplay:
 
         # What is left goes to the completions, which are the one section with no natural length:
         # a rule plus as many of the most recent as reach the bottom of the screen.
+        self._clicks = {}
         if room - keep > 2 and self._recent:
             rows = self._recent_lines(inner, room - keep - 1)
-            body.append(_rule("just finished", inner))
-            body.extend(_row(line, inner) for line in rows)
+            body.append(_rule(_RECENT_TITLE, inner))
+            # A frame is the top rule and then the body, so a row's index in the body is one less
+            # than the line it is drawn on — which is what a click reports and what this maps.
+            first = len(body) + 1
+            for offset, (line, rel_path) in enumerate(rows):
+                self._clicks[first + offset] = rel_path
+                body.append(_row(line, inner))
             room -= 1 + len(rows)
 
         # The last line is the one worth reading at that moment: how to stop a run that is going, or
@@ -699,19 +836,29 @@ class TuiDisplay:
             lines.append(f"{label}{stat}  {named_recording(rel_path, size_bytes, seconds, room)}")
         return lines
 
-    def _recent_lines(self, inner: int, limit: int) -> list[str]:
+    def _recent_lines(self, inner: int, limit: int) -> list[tuple[str, str]]:
         """The recordings that have landed, newest first, as many as ``limit`` allows.
 
         The outcome sits in a column just past the longest path rather than against the right edge:
         on a wide terminal a run of short names would put every count eighty characters from the
         name it belongs to.
+
+        Returns:
+            ``(line, rel_path)`` per row. The path travels with the line because these rows are
+            the one thing on this screen that can be clicked, and the click arrives as a line
+            number.
         """
         room = min(_RECENT_PATH, max(12, inner - _RECENT_TAIL - 4))
         rows = list(self._recent)[: max(0, limit)]
         marks = {"✓": GREEN, "✗": RED, "·": DIM}
-        return [f"{paint(mark, marks.get(mark, DIM))} {fit_path(rel_path, room):<{room}}  "
-                f"{paint(fit_path(tail, _RECENT_TAIL), DIM if mark != '✗' else RED)}"
-                for mark, rel_path, tail in rows]
+        out = []
+        for mark, rel_path, tail in rows:
+            picked = rel_path == self._picked
+            line = (f"{paint('▸' if picked else ' ', CYAN)}"
+                    f"{paint(mark, marks.get(mark, DIM))} {fit_path(rel_path, room):<{room}}  "
+                    f"{paint(fit_path(tail, _RECENT_TAIL), DIM if mark != '✗' else RED)}")
+            out.append((paint(line, CYAN) if picked else line, rel_path))
+        return out
 
 
 def _top(title: str, right: str, width: int) -> str:

@@ -61,7 +61,7 @@ rail: Check the build platform tag
 note: The **platform** line is the tag this machine reports — OS, CPU architecture, Python minor version. It is the first thing to check if a download is ever refused. The licence is shown once and accepted once.
 term:
 $ siar-app version
-siar-app 0.6.0
+siar-app 0.7.0
 ! platform     linux-x86_64-cp313
 python       3.13.1
 licence      MIT (not yet accepted)
@@ -279,7 +279,7 @@ rail: Update / Delete application
 note: The token, licence, history and cached algorithms all survive an app upgrade.
 term:
 $ uv tool upgrade siar-app
-. Updated siar-app v0.5.0 -> v0.6.0
+. Updated siar-app v0.6.0 -> v0.7.0
 
 . # Installed from git, so uv compares version numbers. Same number, newer commit?
 $ uv tool install --force --python 3.13 git+https://github.com/energy-master/siar.git

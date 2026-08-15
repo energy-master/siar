@@ -513,3 +513,55 @@ def test_a_run_records_what_the_next_run_draws_its_first_bars_from(corpus, stub,
     assert rate > 0, "a run that scanned audio must leave a cost behind"
     assert shares.get("scan", 0) > 0
     assert recent_cost("some_other_algorithm") == (0.0, {})
+
+
+def test_a_run_of_milliseconds_still_leaves_a_cost_behind(tmp_path, monkeypatch):
+    """A trial over a handful of clips is exactly the run whose figures the next one needs.
+
+    Per-file times are milliseconds on a folder of clips, and a history that rounded them to a
+    hundredth of a second would record "no time at all" — after which
+    :func:`~siarapp.config.recent_cost` divides by zero worker seconds, comes back with nothing,
+    and the next run draws no bars until its first recording lands. Which, on a corpus of
+    hour-long files, is an hour of a screen with nothing moving on it.
+    """
+    monkeypatch.setenv("SIAR_APP_HOME", str(tmp_path / "home"))
+    from siarapp.cli import commands
+    from siarapp.config import recent_cost
+    from siarapp.runner import RunOptions
+
+    manifest = {
+        "started_at": "2026-08-16T09:00:00Z",
+        "files": 3,
+        "structures": 4,
+        "workers": 1,
+        "elapsed_sec": 0.012,
+        "by_status": {"scanned": 3},
+        "phases": {"scan": 0.006, "fft": 0.003},
+        "manifest": [
+            {"path": f"clip{i}.wav", "status": "scanned", "duration_sec": 1.0,
+             "elapsed_sec": 0.002}
+            for i in range(3)
+        ],
+    }
+    monkeypatch.setattr(commands, "run_folder", lambda *a, **k: manifest)
+
+    class _Reporter:
+        on_result = on_start = on_corpus = on_idle = on_stage = staticmethod(lambda *a, **k: None)
+
+        def close(self):
+            pass
+
+    written, failure = commands.perform_run(
+        _Handle(), str(tmp_path / "src"), str(tmp_path / "out"), RunOptions(), _Reporter())
+
+    assert failure == "" and written is manifest
+    rate, shares = recent_cost("stub")
+    assert rate > 0, "six milliseconds of work is still work, and the next run needs the number"
+    assert shares.get("scan", 0) > 0
+
+
+class _Handle:
+    """The two things :func:`perform_run` reads off a loaded algorithm."""
+
+    slug = "stub"
+    platform = "source"

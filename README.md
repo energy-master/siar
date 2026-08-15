@@ -136,8 +136,9 @@ Anything more precise is a flag on `siar-app run`.
 
 Then <kbd>enter</kbd> on **▶ start**, and the run takes the screen — the same live panel as
 [`siar-app run --tui`](#watching-a-long-run---tui), with the bar, the stage breakdown, a row per
-worker and what is being found. <kbd>Ctrl-Q</kbd> closes it and hands the library back, with the
-result on the form and the run in the history at the bottom of the screen.
+worker and what is being found — and any recording it has finished one click away, spectrogram and
+boxes and all. <kbd>Ctrl-Q</kbd> closes it and hands the library back, with the result on the form
+and the run in the history at the bottom of the screen.
 
 | Key | What it does |
 |---|---|
@@ -351,7 +352,7 @@ Useful flags:
 | Flag | Why |
 |---|---|
 | `--parallel` | Scan several recordings at once, one process per core. The single biggest lever on a large corpus. |
-| `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. Holds the finished run on screen until Ctrl-Q. |
+| `--tui` | Draw the whole run in one live panel: progress, where the time is going, what is being found, a row per worker. Click a finished recording to see its spectrogram with the boxes on it. Holds the finished run on screen until Ctrl-Q. |
 | `--resume` | Carry on where an interrupted run stopped. Safe to pass always. |
 | `--limit 20` | Trial the algorithm on twenty files before committing to a corpus. |
 | `--max-size 2GB` | Raise (or with `0`, remove) the ceiling on how big a recording may be. Default 550MB — see [Memory](#notes). |
@@ -437,14 +438,47 @@ siar-app run ~/three-week-stream -a all_structures --out ~/stream-scan --paralle
 │   3  ············   idle                                                          │
 ├─ problems ────────────────────────────────────────────────────────────────────────┤
 │ ! station-b/2026-06-28/1130.wav: could not decode: Format not recognised.         │
-├─ just finished ───────────────────────────────────────────────────────────────────┤
-│ ✓ station-a/2026-07-03/0400.wav                             37 structures         │
-│ ✓ station-c/2026-07-02/2350.wav                             12 structures         │
-│ Ctrl-C leaves a usable folder — --resume picks it up where it stopped.            │
+├─ just finished — enter or click to see the spectrogram ───────────────────────────┤
+│ ▸✓ station-a/2026-07-03/0400.wav                            37 structures         │
+│  ✓ station-c/2026-07-02/2350.wav                            12 structures         │
+│ Ctrl-C leaves a usable folder — --resume picks it up.  ↑↓ or click, enter opens.  │
 ╰───────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 The stage duration data allows you to fine tune and understand where compute is spent.
+
+**Look at what it found, while it is still running.** Click a recording in *just finished* — or
+pick it with ↑↓ and press <kbd>enter</kbd> — and its spectrogram opens in the panel with every
+structure outlined on it:
+
+```
+ station-a/2026-07-03/0400.wav   1 of 37
+────────────────────────────────────────────────────────────────────────────────────
+  40.0 min  ·  4.5–8.7 kHz  zoomed to what was found  ·  37 structures
+  8.7k ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+       ▀▀▀▀▀▀▀▀┏━━━━━━┓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀┏━━━━━┓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  7.6k ▀▀▀▀▀▀▀▀┃▀▀▀▀▀▀┃▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀┃▀▀▀▀▀┃▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+       ▀▀▀▀▀▀▀▀┗━━━━━━┛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀┗━━━━━┛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  6.6k ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+       0:00          10:00          20:00          30:00                      40:00
+────────────────────────────────────────────────────────────────────────────────────
+  █ tonal 21   █ sweep 12   █ click 4
+ ←/→ previous/next recording   q close   z whole recording
+```
+
+It is the same picture the web app draws — the same reduction, the same viridis, and the boxes in
+the same colour per shape — rendered two pixels to a character cell, in 24-bit colour where the
+terminal has it and an intensity ramp where it does not. **The run carries on underneath**: this
+reads the finished recording back out of the output folder, which is complete after every file.
+
+| Key | In the picture |
+|---|---|
+| <kbd>←</kbd> <kbd>→</kbd> | the previous / next finished recording |
+| `z` | zoom to the band the structures are in, and back out again |
+| `q` | close it and go back to the run |
+
+That answers the question a survey asks at recording forty — *is it finding the right thing* —
+without stopping the scan, copying the folder, or finding a machine with a browser on it.
 
 ## 5. Open the result in IDent Dynamics
 
@@ -556,7 +590,7 @@ Every command prints a two-line banner first:
 
 ```
 SIaR · Signal Information and Reconnaissance · goident.ai
-siar-app 0.6.0 · © Vixen Intelligence 2026
+siar-app 0.7.0 · © Vixen Intelligence 2026
 ```
 
 It goes to **stderr**, never stdout — `algorithms --json`, `installed --json` and `runs --json`
@@ -585,7 +619,7 @@ as one started from a shell.
 
 ```bash
 $ siar-app version
-siar-app 0.6.0
+siar-app 0.7.0
 platform     linux-x86_64-cp313
 licence      MIT
 © Vixen Intelligence 2026
@@ -823,7 +857,7 @@ else stays a string. An algorithm that wanted a float should not receive `"2.5"`
 | `--max-size SIZE` | skip recordings larger than this (default `550MB`; `0` for no ceiling). Takes `KB`, `MB`, `GB` or a plain byte count |
 | `--parallel [N]` | scan N recordings at once, one process each; bare `--parallel` uses every core the machine's memory will hold |
 | `--no-recursive` | only the top level of the folder |
-| `--tui` | draw the whole run in one live panel, held at the end until Ctrl-Q — [see above](#watching-a-long-run---tui). Needs a terminal |
+| `--tui` | draw the whole run in one live panel, and open any finished recording's spectrogram from it; held at the end until Ctrl-Q — [see above](#watching-a-long-run---tui). Needs a terminal |
 | `--quiet`, `-q` | no per-file progress |
 
 The first run of an algorithm downloads it and displays a progress bar:
