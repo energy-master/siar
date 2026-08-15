@@ -31,6 +31,7 @@ __all__ = [
     "RED",
     "RESET",
     "SHOW_CURSOR",
+    "SPINNER_FRAMES",
     "YELLOW",
     "bar",
     "clip",
@@ -46,6 +47,7 @@ __all__ = [
     "set_colour",
     "share",
     "size_and_length",
+    "spin",
     "stamp",
     "stage_tag",
     "paint",
@@ -58,6 +60,11 @@ BAR_WIDTH = 24
 #: An estimated bar never draws past this. A bar that reaches 100% and then keeps going has told
 #: the user the wrong thing twice; one that waits at 99% has only ever said "nearly", which is true.
 BAR_CAP = 99.0
+
+#: Frames of the spinner :func:`spin` cycles through. Braille dots because they are one column
+#: wide in every terminal that draws the box characters the panels already use, and because a
+#: rotating shape reads as "still working" where a blinking one reads as "stuck".
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 #: Terminal control: hide the cursor while a panel is redrawing under it.
 HIDE_CURSOR = "\033[?25l"
@@ -171,6 +178,23 @@ def bar(fraction: float, width: int = BAR_WIDTH) -> str:
     """A fixed-width progress bar, brackets included."""
     filled = int(round(max(0.0, min(1.0, fraction)) * width))
     return "[" + "█" * filled + "░" * (width - filled) + "]"
+
+
+def spin(tick: int) -> str:
+    """One frame of the waiting spinner.
+
+    For the one thing a bar cannot describe: work whose end is not known yet, such as walking a
+    folder nobody has counted. A bar there would have to invent a denominator, and a number that
+    moves for reasons the reader cannot see is worse than a dot that only claims to be alive.
+
+    Args:
+        tick: Any counter — the frame is ``tick`` modulo the number of frames, so a caller can
+            simply increment.
+
+    Returns:
+        A single character.
+    """
+    return SPINNER_FRAMES[int(tick) % len(SPINNER_FRAMES)]
 
 
 def clip(text: str, width: int) -> str:

@@ -19,14 +19,18 @@ Channel selection matches ``js/audio/channel.js`` exactly: ``mix`` averages ever
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable, Iterable
 
 import numpy as np
 
 __all__ = [
     "AUDIO_EXTENSIONS",
+    "COUNT_BUDGET_SEC",
+    "COUNT_LIMIT",
     "AudioInfo",
     "Recording",
+    "count_recordings",
     "find_recordings",
     "is_audio",
     "load_mono",
@@ -48,6 +52,21 @@ _JUNK_PREFIXES = ("._",)
 #: the longest recording in a survey, coarse enough that the per-read overhead is invisible
 #: against the decoding itself.
 _DECODE_BLOCK_FRAMES = 1 << 20
+
+#: Recordings :func:`count_recordings` counts before it stops and says "and more". Far past any
+#: figure a reader takes off a form field, far short of walking a survey drive to the end to put
+#: an exact number on a line whose only job is to say "yes, there is a corpus here".
+COUNT_LIMIT = 10_000
+
+#: Seconds :func:`count_recordings` will walk for before it gives up. A folder of clips is counted
+#: in milliseconds and a survey drive in a second or two; a home directory with a decade of
+#: everything in it, or a mount that has gone away, is not counted at all — and the difference
+#: must not be an interface that never opens.
+COUNT_BUDGET_SEC = 4.0
+
+#: How often a walk in progress reports in, in seconds. Slow enough to cost nothing on a local
+#: folder, fast enough that a spinner driven by it looks alive rather than stuck.
+_COUNT_TICK_SEC = 0.1
 
 
 class AudioInfo:
@@ -141,6 +160,57 @@ def find_recordings(root: str, *, recursive: bool = True) -> list[str]:
             if is_audio(n):
                 found.append(os.path.join(dirpath, n))
     return sorted(found, key=lambda p: os.path.relpath(p, root))
+
+
+def count_recordings(root: str, *, limit: int = COUNT_LIMIT,
+                     budget_sec: float = COUNT_BUDGET_SEC,
+                     on_progress: Callable[[int], None] | None = None) -> tuple[int, bool]:
+    """How many recordings are under ``root``, giving up rather than taking forever.
+
+    :func:`find_recordings` walks to the end because a run has to — it is about to read every
+    file it finds. Answering "is there a corpus here" for a line on a form is a different
+    question, asked about paths nobody has vouched for: a working directory, a mount point, a
+    home directory. So this walk is bounded twice, by the count and by the clock, and it says
+    which of the two stopped it by refusing to call the answer complete.
+
+    Args:
+        root: Folder to walk, or a single recording.
+        limit: Stop once this many have been found.
+        budget_sec: Stop after this long. Always applies; a caller that wants the true figure
+            wants :func:`find_recordings`.
+        on_progress: Called with the count so far, about every
+            :data:`_COUNT_TICK_SEC`, so a caller can say what is happening while it happens. A
+            walk that finishes inside one tick never calls it, which is why a spinner driven
+            from here does not flash on a folder of six clips.
+
+    Returns:
+        ``(count, complete)``. ``complete`` is False when a bound stopped the walk, in which case
+        the count is a floor and not a total — "12,000+", never "12,000".
+    """
+    root = os.path.abspath(root)
+    if os.path.isfile(root):
+        return (1, True) if is_audio(root) else (0, True)
+
+    started = time.monotonic()
+    deadline = started + max(0.0, float(budget_sec))
+    next_tick = started + _COUNT_TICK_SEC
+    count = 0
+    for _dirpath, dirnames, filenames in os.walk(root):
+        now = time.monotonic()
+        if now >= deadline:
+            return count, False
+        if on_progress is not None and now >= next_tick:
+            next_tick = now + _COUNT_TICK_SEC
+            on_progress(count)
+        # The same trees find_recordings skips, for the same reasons — a count that disagreed
+        # with the walk the run does would be a form field that promises files nothing reads.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            if is_audio(name):
+                count += 1
+                if count >= limit:
+                    return count, False
+    return count, True
 
 
 def probe(path: str) -> AudioInfo | None:

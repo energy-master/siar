@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from siarapp.cli import screen
 from siarapp.cli.format import (
@@ -55,6 +55,7 @@ from siarapp.cli.format import (
     fit_path,
     human_bytes,
     paint,
+    spin,
     stamp,
 )
 from siarapp.cli.progress import Throughput
@@ -62,7 +63,7 @@ from siarapp.cli.table import render_table
 from siarapp.cli.tui import TuiDisplay
 from siarapp.config import recent_cost, run_history
 from siarapp.grid import ScannerError
-from siarapp.io.audio import find_recordings, is_audio, probe
+from siarapp.io.audio import count_recordings, find_recordings, is_audio, probe
 from siarapp.library import Model, feature_usage, library
 from siarapp.loader import load_cached, load_local
 from siarapp.runner import DEFAULT_MAX_BYTES, RunOptions
@@ -457,13 +458,16 @@ class Form:
         parallel: :data:`_PARALLEL_OFF` or :data:`_PARALLEL_AUTO`.
         cursor: Which of :data:`_RUN_ROWS` is selected.
         count: Recordings under the input path, as counted when it was chosen.
+        counted: Whether that count is the whole of it. False when the walk hit a bound and the
+            count is a floor — which is a different thing from zero, and must not be read as
+            "there is nothing here".
         note: What the input path turned out to be — the recording count, or why there is none.
         out_touched: Whether the output path has been chosen. Until it has, selecting a different
             model renames it, because an output folder named after a model nobody chose is worse
             than one that follows the choice.
     """
 
-    __slots__ = ("input", "out", "parallel", "cursor", "count", "note", "out_touched")
+    __slots__ = ("input", "out", "parallel", "cursor", "count", "counted", "note", "out_touched")
 
     def __init__(self, input: str = "", out: str = "", parallel: int = _PARALLEL_OFF) -> None:
         self.input = input
@@ -471,6 +475,7 @@ class Form:
         self.parallel = parallel
         self.cursor = 0
         self.count = 0
+        self.counted = True
         self.note = ""
         self.out_touched = False
 
@@ -487,10 +492,16 @@ class Form:
         """Off, or every core — the only two answers this screen offers."""
         self.parallel = (_PARALLEL_AUTO if self.parallel == _PARALLEL_OFF else _PARALLEL_OFF)
 
-    def set_input(self, path: str) -> None:
-        """Take a chosen input path, and look at what is actually under it."""
+    def set_input(self, path: str, progress: Callable[[int], None] | None = None) -> None:
+        """Take a chosen input path, and look at what is actually under it.
+
+        Args:
+            path: The folder or recording chosen.
+            progress: Passed to :meth:`describe_input`, to say what is happening while a large
+                folder is being counted.
+        """
         self.input = path
-        self.describe_input()
+        self.describe_input(progress)
 
     def set_output(self, path: str) -> None:
         """Take a chosen output path. From here on it is the reader's, not the model's."""
@@ -505,29 +516,46 @@ class Form:
         """The output path, expanded and absolute."""
         return os.path.abspath(os.path.expanduser(self.out)) if self.out else ""
 
-    def describe_input(self) -> None:
+    def describe_input(self, progress: Callable[[int], None] | None = None) -> None:
         """Count what is under the input path, and say so on the form.
 
         Done once, when a path is chosen, and remembered: it is a walk of the corpus, which is
         free on a folder of clips and is not on a survey drive — and this screen redraws several
         times a second. :meth:`blocking` reads the count rather than walking again for the same
         reason.
+
+        Bounded, by :func:`~siarapp.io.audio.count_recordings`. The path being described is often
+        one nobody chose — the working directory this command was typed in — and a folder that
+        takes a minute to walk must cost a line that says so, never an interface that has not
+        appeared yet. What it cannot do is claim the folder is empty: an unfinished count says
+        "more than this", and :meth:`blocking` lets the run go and walk it properly.
+
+        Args:
+            progress: Called with the count so far while the walk runs, so the screen can say
+                what is happening. ``None`` walks silently.
         """
         source = self.source()
         self.count = 0
+        self.counted = True
         if not source:
             self.note = ""
             return
         if not os.path.exists(source):
             self.note = "no such folder or file"
             return
-        found = find_recordings(source)
-        self.count = len(found)
-        if not found:
+        self.count, self.counted = count_recordings(source, on_progress=progress)
+        if not self.counted:
+            self.note = (f"{self.count:,}+ recordings — too big to count from here"
+                         if self.count else "too big to count from here — the run will walk it")
+            return
+        if not self.count:
             self.note = "no .wav or .flac here"
             return
         if self.count == 1:
-            info = probe(found[0])
+            # A walk that finished inside the budget is one that can be afforded twice, and the
+            # length of the single recording is worth the second pass.
+            found = find_recordings(source)
+            info = probe(found[0]) if found else None
             length = f" · {duration(info.duration_sec)}" if info is not None else ""
             self.note = f"1 recording{length}"
             return
@@ -549,7 +577,7 @@ class Form:
         source = self.source()
         if not os.path.exists(source):
             return f"{self.input} is not a folder or a recording"
-        if not self.count:
+        if self.counted and not self.count:
             return f"no .wav or .flac under {self.input}"
         if not self.out:
             return "choose where to write (o)"
@@ -575,10 +603,13 @@ class Library:
             it is the screen and it has the keys.
         message: A line under the form: the outcome of the last run, or why one did not start.
         message_kind: ``"ok"``, ``"warn"`` or ``"error"``, which is all the colour it gets.
+        counting: What to call while a chosen folder is being counted, set by :func:`run` to a
+            function that redraws the frame. Left ``None`` in a test, where there is no screen
+            to redraw and nothing waiting to see one.
     """
 
     __slots__ = ("models", "runs", "cursor", "program_cursor", "focus", "form", "picker",
-                 "message", "message_kind")
+                 "message", "message_kind", "counting")
 
     def __init__(self, models: list[Model] | None = None, form: Form | None = None,
                  runs: list[dict] | None = None) -> None:
@@ -591,6 +622,7 @@ class Library:
         self.picker: Picker | None = None
         self.message = ""
         self.message_kind = "ok"
+        self.counting: Callable[[int], None] | None = None
 
     # -- state ---------------------------------------------------------------------------------
 
@@ -671,14 +703,22 @@ class Library:
         self.picker = Picker(kind, start)
 
     def choose(self, path: str) -> None:
-        """Take what the browser came back with, and close it."""
+        """Take what the browser came back with, and close it.
+
+        The browser is closed *before* the input path is counted, not after: counting is the one
+        thing here that can take more than an instant, and the frame drawn under it should be the
+        form the answer is going onto rather than the file list the reader has finished with.
+        """
         if self.picker is None:
             return
-        if self.picker.kind == "input":
-            self.form.set_input(path)
+        kind = self.picker.kind
+        self.picker = None
+        if kind == "input":
+            self.say("")
+            self.form.set_input(path, self.counting)
+            self.say("")
         else:
             self.form.set_output(path)
-        self.picker = None
 
     def say(self, message: str, kind: str = "ok") -> None:
         """Put one line under the form."""
@@ -1240,6 +1280,45 @@ def _start_run(lib: Library) -> None:
     )
 
 
+def _console_counting(label: str) -> Callable[[int], None]:
+    """A spinner on the shell's own buffer, for the count that happens before the screen exists.
+
+    The working directory is counted before the alternate screen is taken, because what it turns
+    out to be decides what the form opens with. That count is the one thing on the way in that can
+    take a noticeable moment — on a home directory, or a survey drive over a slow link — and a
+    command that prints nothing while it does is a command that has hung, as far as anyone
+    watching can tell.
+
+    Args:
+        label: The path being walked, already shortened to fit a line.
+
+    Returns:
+        A function to hand to :meth:`Form.describe_input` as its progress callback. Rewrites one
+        line in place; :func:`_console_counted` takes the line back.
+    """
+    ticks = [0]
+
+    def report(count: int) -> None:
+        ticks[0] += 1
+        found = f" — {count:,} so far" if count else ""
+        sys.stdout.write(f"\r{spin(ticks[0])} looking for recordings in {label}{found}"
+                         f"{screen.CLEAR_TO_EOL}")
+        sys.stdout.flush()
+
+    return report
+
+
+def _console_counted() -> None:
+    """Take back the line :func:`_console_counting` was drawing on.
+
+    Unconditional: a walk that finished inside the first tick never drew anything, and clearing a
+    line that was never written costs one escape sequence and leaves the terminal exactly as it
+    was.
+    """
+    sys.stdout.write("\r" + screen.CLEAR_TO_EOL)
+    sys.stdout.flush()
+
+
 def run(args: Any = None) -> int:
     """Show the library. The whole command.
 
@@ -1258,12 +1337,25 @@ def run(args: Any = None) -> int:
 
     lib = Library(form=Form(input=os.getcwd()))
     lib.load()
-    lib.form.describe_input()
-    if lib.form.note.startswith("no "):
-        # The working directory is a reasonable guess and a common wrong one. Offer it, but do
-        # not pretend it is a corpus.
+    lib.form.describe_input(_console_counting(fit_path(os.getcwd(), 48)))
+    _console_counted()
+    if not lib.form.count:
+        # The working directory is a reasonable guess and a common wrong one. Offer it only when
+        # the walk found recordings in it — nothing found, and nothing counted before the walk
+        # gave up, both mean this is somebody's home directory rather than a corpus.
         lib.form.input = ""
         lib.form.note = ""
+        lib.form.counted = True
+
+    def counting(found: int) -> None:
+        """Say what a walk started from the browser is doing, over the form it will land on."""
+        ticks[0] += 1
+        lib.say(f"{spin(ticks[0])} counting recordings — {found:,} so far")
+        columns, rows = screen.size()
+        screen.draw(render(lib, columns, rows), columns, rows)
+
+    ticks = [0]
+    lib.counting = counting
 
     try:
         with screen.screen():

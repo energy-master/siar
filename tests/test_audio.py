@@ -87,3 +87,51 @@ def test_a_mono_file_ignores_the_channel_request(tmp_path):
     for channel in ("mix", "left", "right"):
         assert load_mono(path, channel=channel).samples.shape == (400,)
     assert load_mono(path).channels == 1
+
+
+# -- counting a folder nobody has vouched for -------------------------------------------------
+
+
+@pytest.fixture()
+def survey(tmp_path):
+    """Recordings at two levels, one in a hidden tree, and a file that is not audio."""
+    (tmp_path / "stationA").mkdir()
+    (tmp_path / ".thumbs").mkdir()
+    for name in ("a.wav", "b.flac"):
+        (tmp_path / name).write_bytes(b"RIFF")
+    (tmp_path / "stationA" / "c.wav").write_bytes(b"RIFF")
+    (tmp_path / ".thumbs" / "d.wav").write_bytes(b"RIFF")
+    (tmp_path / "notes.txt").write_text("not a recording")
+    return tmp_path
+
+
+def test_the_count_agrees_with_the_walk_the_run_will_do(survey):
+    """A form field that promised files the runner then skips would be a form field lying."""
+    assert audio.count_recordings(str(survey)) == (3, True)
+    assert len(audio.find_recordings(str(survey))) == 3
+
+
+def test_the_count_stops_at_its_limit_and_says_the_figure_is_a_floor(survey):
+    assert audio.count_recordings(str(survey), limit=2) == (2, False)
+
+
+def test_a_spent_budget_comes_back_unknown_rather_than_empty(survey):
+    """The difference the whole bound turns on: "not counted" must never read as "nothing here"."""
+    assert audio.count_recordings(str(survey), budget_sec=0.0) == (0, False)
+
+
+def test_one_recording_is_answered_without_walking_anything(survey):
+    assert audio.count_recordings(str(survey / "a.wav")) == (1, True)
+    assert audio.count_recordings(str(survey / "notes.txt")) == (0, True)
+
+
+def test_a_walk_that_takes_a_while_says_so_and_a_quick_one_stays_quiet(survey, monkeypatch):
+    quick = []
+    audio.count_recordings(str(survey), on_progress=quick.append)
+    assert quick == [], "a folder of clips must not flash a spinner"
+
+    monkeypatch.setattr(audio, "_COUNT_TICK_SEC", 0.0)
+    slow = []
+    assert audio.count_recordings(str(survey), on_progress=slow.append) == (3, True)
+    assert slow, "a walk in progress reports what it has found so far"
+    assert slow == sorted(slow), "the count it reports only ever rises"

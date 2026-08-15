@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - Windows
     tty = None
 
 __all__ = [
+    "CLEAR_TO_EOL",
     "capture_keys",
     "click_at",
     "decode_csi",
@@ -57,7 +58,10 @@ _ALT_ON = "\033[?1049h"
 _ALT_OFF = "\033[?1049l"
 _HOME = "\033[H"
 _CLEAR = "\033[2J"
-_CLEAR_TO_EOL = "\033[K"
+
+#: Blank the rest of the row. Public because a line rewritten in place on the *normal* buffer —
+#: a spinner before a screen exists — needs exactly this and should not spell it a second time.
+CLEAR_TO_EOL = "\033[K"
 
 #: Smallest terminal a frame is drawn into. Below this it is drawn at this size anyway and the
 #: terminal scrolls it — a window that narrow cannot show a library, and every render function
@@ -228,7 +232,7 @@ def draw(lines: list[str], width: int, height: int) -> None:
     out = [_HOME]
     for row in range(height):
         text = lines[row] if row < len(lines) else ""
-        out.append(fit(text, width) + _CLEAR_TO_EOL)
+        out.append(fit(text, width) + CLEAR_TO_EOL)
         if row < height - 1:
             out.append("\r\n")
     sys.stdout.write("".join(out))

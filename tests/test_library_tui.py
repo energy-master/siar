@@ -405,3 +405,40 @@ def test_completion_extends_a_path_as_far_as_it_is_unambiguous(tmp_path):
     assert tui.complete_path(str(tmp_path / "surv")) == str(tmp_path / "surveys-202")
     assert tui.complete_path(str(tmp_path / "surveys-2026")) == str(tmp_path / "surveys-2026") + os.sep
     assert tui.complete_path(str(tmp_path / "nothing")) == str(tmp_path / "nothing")
+
+
+def test_a_folder_too_big_to_count_is_not_read_as_an_empty_one(corpus, monkeypatch):
+    """`siar-app lib` opens in whatever folder it was typed in, and that is often a home
+    directory. Giving up on the walk must cost a note, not a run the form refuses to start."""
+    monkeypatch.setattr(tui, "count_recordings", lambda *a, **k: (0, False))
+    form = tui.Form(out="/out")
+    form.set_input(str(corpus))
+
+    assert "too big to count" in form.note
+    assert "no .wav or .flac" not in form.blocking(_built())
+
+
+def test_a_count_that_stopped_short_says_so_rather_than_rounding_it_off(corpus, monkeypatch):
+    monkeypatch.setattr(tui, "count_recordings", lambda *a, **k: (10_000, False))
+    form = tui.Form()
+    form.set_input(str(corpus))
+
+    assert form.note.startswith("10,000+ recordings")
+
+
+def test_choosing_a_folder_reports_the_count_as_it_goes(corpus, monkeypatch):
+    """The wiring the spinner rides on: the browser's choice reaches the walk's progress."""
+    def walk(_source, on_progress=None, **_kw):
+        on_progress(7)
+        return 12, True
+
+    monkeypatch.setattr(tui, "count_recordings", walk)
+    lib = _library()
+    seen = []
+    lib.counting = seen.append
+    lib.open_picker("input")
+    lib.choose(str(corpus))
+
+    assert seen == [7]
+    assert lib.picker is None, "the browser closes before the counting starts"
+    assert lib.form.count == 12
