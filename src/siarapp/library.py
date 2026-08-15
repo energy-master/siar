@@ -1,12 +1,14 @@
 # Vixen Intelligence c.2026
 """One index of everything this machine can actually run.
 
-Two things arrive by completely different routes and end up doing the same job. A **downloaded**
-model is a PyArmor bundle pulled from IDent Dynamics and unpacked under
+Three things arrive by completely different routes and end up doing the same job. A
+**downloaded** model is a PyArmor bundle pulled from IDent Dynamics and unpacked under
 ``~/.siar-app/algorithms``; a **built** model is one the operator evolved themselves with
 ``siar-build``, which leaves a plain Python package on disk and a row about it in its own index at
-``~/.siar-build/models.db``. Both are handed to :func:`siarapp.runner.run_folder` and neither
-knows about the other.
+``~/.siar-build/models.db``; an **imported** model is one built on another machine and carried
+here as a bundle by :mod:`siarapp.transfer`, which unpacks it under ``~/.siar-app/models`` with
+the build row that travelled with it. All three are handed to :func:`siarapp.runner.run_folder`
+and none of them knows about the others.
 
 Which is exactly why they should be listed together. The question in front of somebody with a
 folder of recordings is "what can I run over this", and answering it out of two commands and one
@@ -31,6 +33,7 @@ import sqlite3
 from datetime import datetime
 
 from siarapp.loader import installed_algorithms
+from siarapp.transfer import installed_bundles
 
 __all__ = [
     "BUILD_HOME_ENV",
@@ -40,7 +43,9 @@ __all__ = [
     "built_models",
     "downloaded_models",
     "feature_usage",
+    "imported_models",
     "library",
+    "local_model",
 ]
 
 #: Moves siar-build's workspace, the way ``$SIAR_APP_HOME`` moves this one. Honoured here so a
@@ -56,9 +61,16 @@ BUILD_DB_NAME = "models.db"
 BUILD_LIMIT = 200
 
 #: What a model of each kind is called on screen and in a message. The distinction is not
-#: cosmetic: one of them can be re-downloaded and the other exists nowhere but this disk.
+#: cosmetic: one of them can be re-downloaded, and the other two exist nowhere but this disk and
+#: whatever machine they were carried from.
 DOWNLOADED = "downloaded"
 BUILT = "built"
+IMPORTED = "imported"
+
+#: The sources whose models are a package on this disk, loaded with
+#: :func:`siarapp.loader.load_local` rather than fetched. Built here or carried here — from the
+#: loader's point of view those are the same thing, and only these two can be exported.
+LOCAL_SOURCES = (BUILT, IMPORTED)
 
 
 class Program:
@@ -152,6 +164,20 @@ class Model:
     def built(self) -> bool:
         """Whether this model was built here, rather than downloaded."""
         return self.source == BUILT
+
+    @property
+    def imported(self) -> bool:
+        """Whether this model was carried here from another machine."""
+        return self.source == IMPORTED
+
+    @property
+    def local(self) -> bool:
+        """Whether this model is a plain package on this disk, whoever produced it.
+
+        The question the loader asks and the one export asks: both are answered by where the
+        model *is*, not by which of the two ways it got here.
+        """
+        return self.source in LOCAL_SOURCES
 
     @property
     def features(self) -> tuple[str, ...]:
@@ -365,13 +391,85 @@ def built_models(db_path: str | None = None, *, limit: int = BUILD_LIMIT) -> lis
         conn.close()
 
 
+def imported_models() -> list[Model]:
+    """The models carried onto this machine from another one, newest import first.
+
+    They are read from this package's own workspace rather than from siar-build's index, because
+    the machine they were built on is not this one and its database is not here. What arrived
+    with them — the build row, the programs, the held-out figures — is in the bundle, so an
+    imported model is as knowable as a local build and says on the row where it came from.
+
+    Returns:
+        One :class:`Model` per imported bundle.
+    """
+    models = []
+    for row in installed_bundles():
+        build = dict(row.get("build") or {})
+        origin = row.get("exported_from") or "another machine"
+        build["imported_from"] = origin
+        build["imported_at"] = row.get("imported_at") or 0
+        build["exported_at"] = row.get("exported_at") or ""
+        build["uid"] = row.get("uid") or ""
+        runnable = bool(row.get("runnable"))
+        models.append(Model(
+            source=IMPORTED,
+            slug=str(row.get("slug") or "model"),
+            title=str(row.get("title") or ""),
+            version=str(row.get("version") or ""),
+            platform="source",
+            path=str(row.get("path") or ""),
+            size_bytes=int(row.get("bytes") or 0),
+            stamped_at=int(row.get("imported_at") or 0),
+            runnable=runnable,
+            note="" if runnable else "the package is missing from this import — import it again",
+            detail=build,
+            programs=[_program_from(p) for p in row.get("programs") or []],
+        ))
+    return models
+
+
+def _program_from(row: dict) -> Program:
+    """One program out of a bundle's manifest, ignoring fields this version does not know."""
+    if not isinstance(row, dict):
+        return Program()
+    known = {name: row[name] for name in Program.__slots__ if name in row}
+    features = known.get("features")
+    if features is not None:
+        known["features"] = tuple(str(name) for name in features)
+    return Program(**known)
+
+
+def local_model(slug: str, *, db_path: str | None = None) -> Model | None:
+    """The runnable model on this disk with this name, newest first, or ``None``.
+
+    What ``siar-app run -a <slug>`` consults before it asks the server: a model that was built
+    here or carried here has no other way of being named, and having to give
+    ``--algorithm-path`` for a model the library is already listing is the CLI failing to know
+    what it knows.
+
+    Args:
+        slug: The name to match, case-insensitively.
+        db_path: siar-build's index, for a test.
+
+    Returns:
+        The most recent runnable match, imported models before local builds when both have the
+        name — an import is the deliberate act of the two.
+    """
+    wanted = str(slug or "").strip().lower()
+    if not wanted:
+        return None
+    candidates = [m for m in imported_models() + built_models(db_path)
+                  if m.runnable and m.slug.lower() == wanted]
+    return candidates[0] if candidates else None
+
+
 def library(*, db_path: str | None = None) -> list[Model]:
-    """Everything runnable on this machine: downloaded bundles, then models built here.
+    """Everything runnable on this machine: downloaded, built here, then carried here.
 
     Grouped rather than interleaved by date. They are different kinds of thing — one can be
-    fetched again from the server and the other exists nowhere but this disk — and a list that
-    sorted them together would make that difference invisible at exactly the moment somebody is
-    choosing between them.
+    fetched again from the server, one exists nowhere but this disk, and one exists here because
+    somebody moved it — and a list that sorted them together would make that difference invisible
+    at exactly the moment somebody is choosing between them.
 
     Args:
         db_path: siar-build's index, for a test or a non-standard workspace.
@@ -379,7 +477,7 @@ def library(*, db_path: str | None = None) -> list[Model]:
     Returns:
         The models, downloaded first, each group newest first.
     """
-    return downloaded_models() + built_models(db_path)
+    return downloaded_models() + built_models(db_path) + imported_models()
 
 
 def feature_usage(models: list[Model]) -> list[tuple[str, int]]:

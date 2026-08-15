@@ -30,6 +30,7 @@ __all__ = [
     "clear_credentials",
     "default_platform_tag",
     "home",
+    "imported_dir",
     "legacy_env",
     "libc_flavour",
     "load_credentials",
@@ -100,6 +101,22 @@ def home() -> str:
 def algorithm_cache_dir(slug: str, platform_tag: str) -> str:
     """Where one algorithm build is unpacked. Created if absent."""
     path = os.path.join(home(), "algorithms", _safe(slug), _safe(platform_tag))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def imported_dir() -> str:
+    """Where models imported from another machine live. Created if absent.
+
+    Beside the algorithm cache and deliberately not inside it: that directory is a cache, and
+    everything in it can be fetched again from the server. This one cannot — an imported model
+    exists on the machine that built it and on the ones somebody carried it to, and clearing a
+    cache must never be the thing that loses it.
+
+    Returns:
+        ``$SIAR_APP_HOME/models``, absolute.
+    """
+    path = os.path.join(home(), "models")
     os.makedirs(path, exist_ok=True)
     return path
 

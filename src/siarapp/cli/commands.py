@@ -81,7 +81,9 @@ from siarapp.runner import RunOptions, run_folder
 
 __all__ = [
     "cmd_algorithms",
+    "cmd_export",
     "cmd_feedback",
+    "cmd_import",
     "cmd_installed",
     "cmd_lib",
     "cmd_license",
@@ -633,6 +635,125 @@ def cmd_lib(args: Namespace) -> int:
     return library_tui.run(args)
 
 
+# -- moving a model between machines ----------------------------------------------------------
+
+
+def cmd_export(args: Namespace) -> int:
+    """Write a model built here to one file that another machine can import.
+
+    With no name it lists what could be exported, because "which of these is it" is the question
+    somebody typing this command half-remembers the answer to.
+    """
+    from siarapp.library import library
+    from siarapp.transfer import TransferError, export_model
+
+    models = [m for m in library() if m.local]
+    if not args.model:
+        return _list_exportable(models)
+
+    wanted = args.model.strip().lower()
+    matches = [m for m in models if m.slug.lower() == wanted or m.detail.get("uid") == args.model]
+    if not matches:
+        print(f"error: no model called {args.model!r} was built or imported on this machine",
+              file=sys.stderr)
+        _list_exportable(models, stream=sys.stderr)
+        return 1
+
+    runnable = [m for m in matches if m.runnable]
+    if not runnable:
+        print(f"error: {args.model} has nothing packaged on this disk — {matches[0].note}",
+              file=sys.stderr)
+        return 1
+    model = runnable[0]
+    if len(runnable) > 1:
+        # Several builds of one target is the normal shape of a search, so this is a note and not
+        # a question: the newest is what anybody means, and the others are still there to name.
+        print(f"note: {len(runnable)} models are called {model.slug}; exporting the newest "
+              f"({stamp(model.stamped_at)}).")
+
+    try:
+        path = export_model(model, args.out or "")
+    except TransferError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    size = human_bytes(os.path.getsize(path))
+    bots = len(model.programs)
+    print(f"Exported {model.slug} — {size}, {bots} bot(s), "
+          f"{len(model.features)} feature(s) — to {path}")
+    print("On the other machine:")
+    print(f"  siar-app import {os.path.basename(path)}")
+    print(f"  siar-app run <audio folder> -a {model.slug} --out <output folder>")
+    return 0
+
+
+def _list_exportable(models: list, stream=sys.stdout) -> int:
+    """Print the models on this machine that can be put in a bundle."""
+    runnable = [m for m in models if m.runnable]
+    if not runnable:
+        print("Nothing here can be exported yet: a bundle carries a model built with siar-build "
+              "or imported from another machine, and this one has neither.", file=stream)
+        print("Downloaded algorithms are licensed per machine — sign in there and fetch them "
+              "with `siar-app run -a <name>` instead.", file=stream)
+        return 1
+    print("Models on this machine that can be exported:", file=stream)
+    print(render_table(
+        ["NAME", "SOURCE", "VERSION", "BOTS", "SIZE", "MADE"],
+        [[m.slug, m.source, m.version or "—", str(len(m.programs)),
+          human_bytes(m.size_bytes), stamp(m.stamped_at)] for m in runnable],
+        align=["<", "<", "<", ">", ">", "<"],
+    ), file=stream)
+    print("\n  siar-app export <name> [--out FILE]", file=stream)
+    return 0
+
+
+def cmd_import(args: Namespace) -> int:
+    """Unpack a model bundle into this machine's workspace, or list the ones already here."""
+    from siarapp.library import imported_models
+    from siarapp.transfer import TransferError, bundle_manifest, import_bundle
+
+    if not args.bundle:
+        return _list_imported(imported_models())
+
+    path = os.path.abspath(os.path.expanduser(args.bundle))
+    if not os.path.isfile(path):
+        print(f"error: {args.bundle} is not a file", file=sys.stderr)
+        return 1
+    try:
+        manifest = bundle_manifest(path)
+        if args.inspect:
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            return 0
+        row = import_bundle(path, into=args.into or "")
+    except TransferError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    origin = row["exported_from"] or "another machine"
+    print(f"Imported {row['slug']} — {human_bytes(row['bytes'])}, {len(row['programs'])} bot(s) — "
+          f"built on {origin}, exported {row['exported_at'] or 'at an unrecorded time'}.")
+    print(f"  {row['path']}")
+    print(f"\nRun it:  siar-app run <audio folder> -a {row['slug']} --out <output folder>")
+    print("It is also in `siar-app lib`, with its bots and the corpus it came off.")
+    return 0
+
+
+def _list_imported(models: list) -> int:
+    """Print what has been carried onto this machine already."""
+    if not models:
+        print("No models have been imported onto this machine.")
+        print("On the machine that has one:  siar-app export <name>")
+        print("Then here:                    siar-app import <file>.siarmodel")
+        return 0
+    print(render_table(
+        ["NAME", "VERSION", "BOTS", "SIZE", "FROM", "IMPORTED"],
+        [[m.slug, m.version or "—", str(len(m.programs)), human_bytes(m.size_bytes),
+          str(m.detail.get("imported_from") or "—"), stamp(m.stamped_at)] for m in models],
+        align=["<", "<", ">", ">", "<", "<"],
+    ))
+    return 0
+
+
 # -- feedback ---------------------------------------------------------------------------------
 
 
@@ -947,11 +1068,29 @@ def _reporter(args: Namespace, slug: str, source: str = "", out_root: str = ""):
 
 
 def _resolve_algorithm(args: Namespace):
-    """Load the algorithm named on the command line, locally or from the server."""
+    """Load the algorithm named on the command line: a path, this disk, or the server.
+
+    A model built here with siar-build, or imported from another machine, is a package on this
+    disk with a name — and needing ``--algorithm-path`` to run something the library is already
+    listing by that name would be the CLI failing to know what it knows. So a local model is
+    looked up before the server is asked, and the run says which one it used, because a name that
+    resolves two ways must never resolve silently.
+    """
     if args.algorithm_path:
         return load_local(os.path.expanduser(args.algorithm_path), args.algorithm or "")
     if not args.algorithm:
         raise ScannerError("give --algorithm SLUG (see `siar-app algorithms`)")
+
+    from siarapp.library import local_model
+
+    model = local_model(args.algorithm)
+    if model is not None:
+        if not getattr(args, "quiet", False):
+            made = "imported from " + str(model.detail.get("imported_from") or "another machine") \
+                if model.imported else "built here"
+            print(f"using {model.slug} ({made}) — {model.path}")
+        return load_local(model.path, model.slug)
+
     client = client_from_credentials(args.server)
     return load_remote(
         client, args.algorithm, args.platform, refresh=args.refresh,

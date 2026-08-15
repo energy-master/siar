@@ -442,3 +442,89 @@ def test_choosing_a_folder_reports_the_count_as_it_goes(corpus, monkeypatch):
     assert seen == [7]
     assert lib.picker is None, "the browser closes before the counting starts"
     assert lib.form.count == 12
+
+
+# -- moving a model between machines ------------------------------------------------------------
+
+
+@pytest.fixture()
+def workspace(tmp_path, monkeypatch):
+    """A workspace of this test's own, so an import here is not an import into the real one."""
+    monkeypatch.setenv("SIAR_APP_HOME", str(tmp_path / "workspace"))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _packaged(root):
+    """A built model with a real package behind it, ready to be exported."""
+    package = root / "siar_thing"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "slug = 'thing'\n"
+        "class _S:\n"
+        "    def scan(self, grid):\n"
+        "        return []\n"
+        "def algorithm(manifest=None):\n"
+        "    return _S()\n"
+    )
+    return tui.Model(source="built", slug="thing", version="0.1.0", platform="source",
+                     path=str(package), runnable=True, stamped_at=1_760_000_000,
+                     detail={"target": "thing"}, programs=[_program()])
+
+
+def test_a_downloaded_model_cannot_be_exported_and_the_screen_says_why(workspace):
+    lib = _library(models=[_downloaded()])
+
+    tui._handle_key(lib, "e")
+
+    assert "licensed per machine" in lib.message
+    assert lib.message_kind == "error"
+    assert not list(workspace.glob("*.siarmodel")), "and nothing was written"
+
+
+def test_exporting_a_built_model_writes_one_file_and_says_how_to_use_it(workspace):
+    lib = _library(models=[_packaged(workspace / "built")])
+
+    tui._handle_key(lib, "e")
+
+    written = list(workspace.glob("*.siarmodel"))
+    assert len(written) == 1
+    assert "siar-app import" in lib.message, "the other half of the instruction travels with it"
+
+
+def test_the_import_browser_offers_bundles_and_nothing_else(workspace):
+    (workspace / "thing.siarmodel").write_bytes(b"x")
+    (workspace / "clip.wav").write_bytes(b"RIFF")
+    (workspace / "notes.txt").write_text("")
+
+    picker = tui.Picker("bundle", str(workspace))
+    labels = [label for _kind, label, _path, _note in picker.entries]
+
+    assert "thing.siarmodel" in labels
+    assert "clip.wav" not in labels and "notes.txt" not in labels
+    assert not any(label.startswith("use this folder") for label in labels), \
+        "there is no such thing as importing a directory"
+
+
+def test_importing_from_the_screen_lands_the_model_and_selects_it(workspace):
+    lib = _library(models=[_packaged(workspace / "built")])
+    tui._handle_key(lib, "e")
+    bundle = str(next(iter(workspace.glob("*.siarmodel"))))
+
+    tui._handle_key(lib, "m")
+    assert lib.picker is not None and lib.picker.kind == "bundle"
+    lib.choose(bundle)
+
+    assert lib.picker is None
+    assert "imported thing" in lib.message
+    assert lib.model() is not None and lib.model().imported, "the cursor lands on what arrived"
+
+
+def test_a_bundle_that_is_not_one_is_a_message_and_not_a_traceback(workspace):
+    (workspace / "junk.siarmodel").write_bytes(b"not a tarball at all")
+    lib = _library(models=[_packaged(workspace / "built")])
+
+    lib.take(str(workspace / "junk.siarmodel"))
+
+    assert "not a readable model bundle" in lib.message
+    assert lib.message_kind == "error"

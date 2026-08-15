@@ -11,8 +11,10 @@ start one.
 
 Three panes, top to bottom, and the order is the decision being made:
 
-* **Models** — the downloaded bundles and the models built here with ``siar-build``, together.
-  :mod:`siarapp.library` is what merges them; nothing here knows how either got onto the disk.
+* **Models** — the downloaded bundles, the models built here with ``siar-build``, and the ones
+  carried here from another machine, together. :mod:`siarapp.library` is what merges the three;
+  nothing here knows how any of them got onto the disk. ``e`` and ``m`` are how the third kind
+  moves: export the selected model to one file, or import one somebody brought.
 * **Bots** — the programs a built model came out of, champion first, and what each one reads. A
   downloaded bundle has none to show and says so: what is inside it is the closed side of the
   seam, and a screen that implied otherwise would be lying about the product.
@@ -67,6 +69,7 @@ from siarapp.io.audio import count_recordings, find_recordings, is_audio, probe
 from siarapp.library import Model, feature_usage, library
 from siarapp.loader import load_cached, load_local
 from siarapp.runner import DEFAULT_MAX_BYTES, RunOptions
+from siarapp.transfer import BUNDLE_SUFFIX, TransferError, export_model, import_bundle
 
 __all__ = ["Form", "Library", "Picker", "complete_path", "render", "run"]
 
@@ -193,8 +196,11 @@ class Picker:
     reader to do the filtering.
 
     Attributes:
-        kind: ``"input"`` or ``"output"`` — which row is being answered. The output browser
-            offers a folder that does not exist yet; the input one offers recordings.
+        kind: ``"input"``, ``"output"`` or ``"bundle"`` — what is being answered. The output
+            browser offers a folder that does not exist yet, the input one offers recordings, and
+            the bundle one offers exported models. Which files a browser lists is the only thing
+            that differs between them, so it is one lookup (:data:`_PICK_FILES`) and not three
+            browsers.
         directory: The folder being shown.
         entries: ``(kind, label, path, note)`` per row, in :data:`_UP`-first order.
         cursor: Which row is selected.
@@ -220,8 +226,7 @@ class Picker:
     @property
     def title(self) -> str:
         """What this browser is answering, for the top of the frame."""
-        return ("CHOOSE WHAT TO SCAN — a folder of recordings, or one recording"
-                if self.kind == "input" else "CHOOSE WHERE TO WRITE — a folder, new or existing")
+        return _PICK_TITLES.get(self.kind, _PICK_TITLES["output"])
 
     def load(self, keep: str = "") -> None:
         """Read the folder into rows.
@@ -235,8 +240,11 @@ class Picker:
         parent = os.path.dirname(self.directory)
         if parent and parent != self.directory:
             self.entries.append((_UP, "..", parent, "up to " + _short(parent)))
-        self.entries.append((_USE, f"use this folder — {_short(self.directory)}",
-                             self.directory, ""))
+        if self.kind != "bundle":
+            # A folder is an answer to "what to scan" and "where to write", and never to "which
+            # bundle": there is no such thing as importing a directory.
+            self.entries.append((_USE, f"use this folder — {_short(self.directory)}",
+                                 self.directory, ""))
         if self.kind == "output":
             self.entries.append((_NEW, "new folder here…", self.directory,
                                  "type a name, or a whole path"))
@@ -254,9 +262,10 @@ class Picker:
             if name.startswith("."):
                 continue
             path = os.path.join(self.directory, name)
+            wanted = _PICK_FILES.get(self.kind)
             if os.path.isdir(path):
                 directories.append((_DIR, name + os.sep, path, ""))
-            elif is_audio(name):
+            elif wanted is not None and wanted(name):
                 files.append((_FILE, name, path, human_bytes(_size(path))))
             else:
                 self.hidden += 1
@@ -264,10 +273,7 @@ class Picker:
         # folder holding four hundred wav files should not push its sibling folders off the
         # screen.
         self.entries += directories
-        if self.kind == "input":
-            self.entries += files
-        else:
-            self.hidden += len(files)
+        self.entries += files
 
         # On the row that chooses this folder, unless we have just stepped up out of one. The
         # browser opens *in* the folder the row already points at, so that row is the answer
@@ -399,6 +405,21 @@ def _size(path: str) -> int:
 #: recording is — rather than repeating the name.
 _PICK_HEADERS = ("NAME", "")
 _PICK_ALIGN = ("<", "<")
+
+#: What each browser is answering, at the top of its frame.
+_PICK_TITLES = {
+    "input": "CHOOSE WHAT TO SCAN — a folder of recordings, or one recording",
+    "output": "CHOOSE WHERE TO WRITE — a folder, new or existing",
+    "bundle": f"CHOOSE A MODEL TO IMPORT — a {BUNDLE_SUFFIX} exported from another machine",
+}
+
+#: Which files each browser lists. Everything else in the folder is counted, not shown: a survey
+#: drive is full of spreadsheets and photographs, and a browser that offered them would be asking
+#: the reader to do the filtering. A kind with no entry here lists folders only.
+_PICK_FILES = {
+    "input": is_audio,
+    "bundle": lambda name: name.endswith(BUNDLE_SUFFIX),
+}
 
 #: Keys under the browser, and under it while a name is being typed.
 _PICK_KEYS = "↑↓ move   enter open/choose   ← up   ~ home   letters jump   esc cancel"
@@ -702,6 +723,10 @@ class Library:
         start = self.form.input if kind == "input" else self.form.out
         self.picker = Picker(kind, start)
 
+    def open_import(self) -> None:
+        """Open the browser over the models a stick or a home directory might have on it."""
+        self.picker = Picker("bundle", os.getcwd())
+
     def choose(self, path: str) -> None:
         """Take what the browser came back with, and close it.
 
@@ -713,12 +738,50 @@ class Library:
             return
         kind = self.picker.kind
         self.picker = None
-        if kind == "input":
+        if kind == "bundle":
+            self.take(path)
+        elif kind == "input":
             self.say("")
             self.form.set_input(path, self.counting)
             self.say("")
         else:
             self.form.set_output(path)
+
+    def take(self, path: str) -> None:
+        """Import a bundle and put the cursor on what arrived.
+
+        The list is read again rather than appended to: an import can also *replace* a model
+        already here, and a screen that appended would show the same model twice until the next
+        reload.
+        """
+        try:
+            row = import_bundle(path)
+        except TransferError as e:
+            self.say(str(e), "error")
+            return
+        self.load()
+        for index, model in enumerate(self.models):
+            if model.imported and model.detail.get("uid") == row["uid"]:
+                self.cursor = index
+                self.focus = "models"
+                self.follow_model()
+                break
+        origin = row["exported_from"] or "another machine"
+        self.say(f"imported {row['slug']} from {origin} — {len(row['programs'])} bot(s), "
+                 f"{human_bytes(row['bytes'])}")
+
+    def give(self) -> None:
+        """Export the selected model into the working directory."""
+        model = self.model()
+        if model is None:
+            return
+        try:
+            path = export_model(model, os.getcwd())
+        except TransferError as e:
+            self.say(str(e), "error")
+            return
+        self.say(f"exported {model.slug} to {path} — "
+                 f"`siar-app import {os.path.basename(path)}` on the other machine")
 
     def say(self, message: str, kind: str = "ok") -> None:
         """Put one line under the form."""
@@ -763,12 +826,24 @@ def _number(value, spec: str = ".3f", missing: str = "—") -> str:
         return missing
 
 
+def _where_from(model: Model) -> str:
+    """The "where from" cell: the three ways a model gets onto a machine, told apart.
+
+    An imported model names the machine it was built on rather than saying "imported", because
+    on a vessel with four of them that is the only part anybody needs.
+    """
+    if model.imported:
+        origin = str(model.detail.get("imported_from") or "")
+        return f"from {origin}" if origin else "imported"
+    return "built here" if model.built else "downloaded"
+
+
 def _model_rows(models: list[Model]) -> list[list[str]]:
     """One row per model, in the order they will be drawn."""
     return [
         [
             model.slug,
-            "downloaded" if not model.built else "built here",
+            _where_from(model),
             model.version or "—",
             "this machine" if model.platform == "source" else model.platform,
             human_bytes(model.size_bytes) if model.size_bytes else "—",
@@ -826,7 +901,7 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
     if not model.runnable:
         lines.append(paint(f"  cannot run here: {model.note}", YELLOW))
 
-    if not model.built:
+    if not model.local:
         family = model.detail.get("family") or "structure_scanners"
         lines += [
             f"  {model.title or model.slug}{paint('   ' + family, DIM)}",
@@ -856,9 +931,11 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
         f"{name}{paint(f'×{usage[name]}', DIM) if usage.get(name, 0) > 1 else ''}"
         for name in model.features
     )
+    made = ("   imported " + stamp(model.stamped_at) + " from "
+            + str(detail.get("imported_from") or "another machine") if model.imported
+            else "   built " + stamp(model.stamped_at) + " by siar-build " + model.version)
     lines += [
-        f"  target {detail.get('target') or model.slug}"
-        f"{paint('   built ' + stamp(model.stamped_at) + ' by siar-build ' + model.version, DIM)}",
+        f"  target {detail.get('target') or model.slug}{paint(made, DIM)}",
         paint(f"  corpus {detail.get('input_dir') or '—'}", DIM),
         f"  audio  {audio}",
         f"  result {gates}",
@@ -977,12 +1054,16 @@ def _run_lines(lib: Library, width: int) -> list[str]:
 
 def _title(lib: Library, width: int) -> str:
     """The one line that says what this machine has."""
-    downloaded = sum(1 for m in lib.models if not m.built)
+    downloaded = sum(1 for m in lib.models if not m.local)
     built = sum(1 for m in lib.models if m.built)
+    imported = sum(1 for m in lib.models if m.imported)
     bots = sum(len(m.programs) for m in lib.models)
     features = len(feature_usage(lib.models))
     counts = (f"{downloaded} downloaded · {built} built here · "
-              f"{bots} bot{'' if bots == 1 else 's'} · "
+              # Named only when there are any: on the machine models are built on, which is most
+              # of them, a permanent "0 imported" would be a column about nothing.
+              + (f"{imported} imported · " if imported else "")
+              + f"{bots} bot{'' if bots == 1 else 's'} · "
               f"{features} feature{'' if features == 1 else 's'}")
     return fit(f"{paint('siar-app', BOLD)}  library{paint('   ' + counts, DIM)}", width)
 
@@ -990,9 +1071,9 @@ def _title(lib: Library, width: int) -> str:
 #: What the footer offers, in the order somebody needs it — and the same list for a terminal too
 #: narrow to hold it, cut to the keys that cannot be guessed. A footer whose right-hand end is
 #: clipped is one that stops mentioning how to leave.
-_KEYS = ("↑↓ select   tab pane   enter choose/run   i scan   o write to   p parallel   "
-         "R reload   q quit")
-_NARROW_KEYS = "↑↓ select  tab pane  enter choose/run  i/o/p rows  q quit"
+_KEYS = ("↑↓ select  tab pane  enter run  i scan  o out  p parallel  e/m export/import  "
+         "R reload  q quit")
+_NARROW_KEYS = "↑↓ tab enter  i/o/p rows  e/m export/import  q quit"
 
 #: Width below which the short list is used.
 _NARROW = 96
@@ -1196,6 +1277,10 @@ def _handle_key(lib: Library, key: str) -> str:
     elif key == "p":
         lib.focus, lib.form.cursor = "run", _RUN_ROWS.index("parallel")
         lib.form.toggle_parallel()
+    elif key == "e":
+        lib.give()
+    elif key == "m":
+        lib.open_import()
     elif key == "R":
         lib.load()
         lib.say("reloaded")
@@ -1217,7 +1302,7 @@ def _load_algorithm(model: Model):
     Raises:
         ScannerError: If the bundle or package will not import, or is no longer on disk.
     """
-    if model.built:
+    if model.local:
         return load_local(model.path, model.slug)
     handle = load_cached(model.slug, model.platform)
     if handle is None:

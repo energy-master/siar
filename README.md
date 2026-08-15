@@ -110,16 +110,18 @@ RUN
    parallel  auto — one worker per core, as many as this machine's memory will hold
  ▸ ▶ start   run recall now
 ────────────────────────────────────────────────────────────────────────────────────────────────
- ↑↓ select   tab pane   enter choose/run   i scan   o write to   p parallel   R reload   q quit
+ ↑↓ select  tab pane  enter run  i scan  o out  p parallel  e/m export/import  R reload  q quit
 ```
 
-Two kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches from
-IDent Dynamics. The ones **built here** are yours, from
+Three kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches
+from IDent Dynamics. The ones **built here** are yours, from
 [`siar-build`](https://github.com/energy-master/siar-build) — read straight out of its own index
 at `~/.siar-build/models.db`, so a model you evolved last week is in the list the moment it is
 packaged, with the **bots** it came out of (the champion and the runners-up of that search), what
 each of them **reads**, and the run they came from. Nothing is copied and nothing is written back;
-delete that database and you lose a listing, not a model.
+delete that database and you lose a listing, not a model. The ones **from another machine** were
+built somewhere else and carried here as one file — `e` exports the selected model, `m` imports
+one, and [moving a model](#7-move-a-model-to-another-machine) is a section of its own below.
 
 A downloaded bundle has no bots to show, and says so. What is inside it is licensed separately and
 stays inside it — that split is the whole design, and the library does not pretend otherwise.
@@ -147,6 +149,8 @@ and the run in the history at the bottom of the screen.
 | <kbd>enter</kbd> | open the browser on a path row, toggle `parallel`, or start the run |
 | `i` / `o` | choose what to scan / where to write |
 | `p` | parallel off or auto |
+| `e` | export the selected model to a `.siarmodel` file here |
+| `m` | import a `.siarmodel` somebody gave you |
 | `R` | re-read the algorithm cache, siar-build's index and the run history |
 | `q` | quit |
 
@@ -555,10 +559,73 @@ afternoon.
 With no folder argument it serves the most recent run from `siar-app runs`.
 
 
+## 7. Move a model to another machine
+
+A model you built is a plain Python package and a row in `siar-build`'s index — the package runs
+anywhere, and the row is what makes it *knowable*: the bots behind it, what each one reads, the
+held-out figures it was gated on. Copying the package alone gets you a detector nobody can vouch
+for. `export` puts both in one file.
+
+```bash
+# on the machine that built it
+$ siar-app export recall
+Exported recall — 110.5 KiB, 6 bot(s), 6 feature(s) — to /home/you/recall-0.1.0.siarmodel
+On the other machine:
+  siar-app import recall-0.1.0.siarmodel
+  siar-app run <audio folder> -a recall --out <output folder>
+```
+
+Move that one file however you move files — `scp`, a stick, a shared drive — and import it:
+
+```bash
+# on the machine that will run it
+$ siar-app import recall-0.1.0.siarmodel
+Imported recall — 603.8 KiB, 6 bot(s) — built on rv-endeavour, exported 2026-08-15T23:18:32+00:00.
+  /home/you/.siar-app/models/recall-54e8eac268f8/package/siar_recall
+
+Run it:  siar-app run <audio folder> -a recall --out <output folder>
+It is also in `siar-app lib`, with its bots and the corpus it came off.
+```
+
+That is the whole of it. **No login, no network and no `siar-build` on the receiving machine** —
+a model you built is yours, nothing in it is obfuscated or licence-locked, and the far side needs
+only siar-app. It is then runnable **by name**, listed in the library with the machine it came
+off, and it scans identically: same grid, same boxes, same output folder.
+
+The same two steps are `e` and `m` in [the library](#the-library--siar-app-with-no-command), if
+you would rather point at it than type it.
+
+**What travels.** The package, the calibration document, the runners-up, the held-out tables, and
+the build row — the corpus it was evolved on, the band, the FFT geometry, the gates it passed.
+Roughly 100 KB, compressed. What does not travel is the corpus itself and anything siar-build
+wrote beside the model, which is where the gigabytes are.
+
+**Downloaded algorithms cannot be exported.** They are licensed per machine and per platform, and
+a bundle built for one is a dead file on another. Sign in on the other machine and let it fetch
+its own:
+
+```bash
+siar-app login
+siar-app run ~/survey-audio -a all_structures --out ~/scan
+```
+
+**Importing does not touch `siar-build`.** That database belongs to another program; siar-app
+reads it and never writes it. An imported model lives in siar-app's own workspace under
+`~/.siar-app/models`, which is why it survives a `siar-build` that was never installed here.
+
+**A bundle is checked before it is unpacked.** It has been carried between machines, so every
+member of the archive is vetted first — nothing absolute, nothing that climbs out of the folder
+with `..`, no symlinks, no device files, and a ceiling on the size — and the files are then
+written out one by one rather than handed to the archive to place. Nothing in a bundle is
+executed by `import`; the model's first line of code runs when you ask for a scan, through the
+same loader every other algorithm goes through.
+
+
 ## Command reference
 
-Fifteen commands. Seven of them (`lib`, `version`, `quick-start`, `readme`, `installed`, `scan`,
-and `run --algorithm-path`) work without an account; the rest need a login.
+Seventeen commands. Nine of them (`lib`, `version`, `quick-start`, `readme`, `installed`,
+`export`, `import`, `scan`, and `run --algorithm-path`) work without an account; the rest need a
+login.
 
 | Command | What it does | Needs a login |
 |---|---|---|
@@ -573,6 +640,8 @@ and `run --algorithm-path`) work without an account; the rest need a login.
 | [`whoami`](#siar-app-whoami) | who the cached token belongs to | reads the cache |
 | [`algorithms`](#siar-app-algorithms) | the algorithms your account can download | yes |
 | [`installed`](#siar-app-installed) | the algorithms on **this machine**, and their versions | no |
+| [`export`](#siar-app-export-name) | write a model you built to one file another machine can import | no |
+| [`import`](#siar-app-import-file) | install a model exported from another machine | no |
 | [`scan`](#siar-app-scan-folder) | summarise a folder from headers alone | no |
 | [`run`](#siar-app-run-folder---out-dir) | scan a folder and build the output folder | first run only |
 | [`runs`](#siar-app-runs) | what has been run from this machine | no |
@@ -792,6 +861,48 @@ has been withdrawn or your account can no longer see it. Nothing will replace wh
 either way; the cache is yours until you refresh it. A `--check` that cannot reach the server
 prints a warning and still gives you the local answer.
 
+### `siar-app export NAME`
+
+Write a model built here — or one already imported here — to a single `.siarmodel` file. See
+[moving a model to another machine](#7-move-a-model-to-another-machine).
+
+```bash
+$ siar-app export
+Models on this machine that can be exported:
+NAME    SOURCE  VERSION  BOTS       SIZE  MADE
+------  ------  -------  ----  ---------  ----------------
+recall  built   0.1.0       6  336.3 KiB  2026-08-15 22:41
+
+  siar-app export <name> [--out FILE]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--out PATH` | file to write, or a folder to write it into (default `<name>-<version>.siarmodel` here) |
+
+With no name it lists what could be exported. When several builds share a name — which is the
+normal shape of a search — the newest packaged one is exported and the command says so.
+Downloaded bundles are refused: they are licensed per machine, and the other machine fetches its
+own.
+
+### `siar-app import FILE`
+
+Install a `.siarmodel` written by `export`. It lands in `~/.siar-app/models`, appears in
+`siar-app lib` with its bots and the corpus it came off, and is runnable by name.
+
+```bash
+$ siar-app import recall-0.1.0.siarmodel
+Imported recall — 603.8 KiB, 6 bot(s) — built on rv-endeavour, exported 2026-08-15T23:18:32+00:00.
+```
+
+| Flag | Meaning |
+|---|---|
+| `--inspect` | print what the bundle says about itself and import nothing |
+| `--into DIR` | unpack somewhere other than the workspace (runnable with `--algorithm-path`, but not listed) |
+
+With no file it lists what has been imported here already. Importing the same model twice
+replaces it rather than making a second copy. Nothing in the bundle is executed by this command.
+
 ### `siar-app scan FOLDER`
 
 Read all the headers and grab relevant data for display before starting a run.
@@ -963,11 +1074,16 @@ Everything lives under one directory.
   license.json                  that you accepted the licence, and when
   runs.json                     what `siar-app runs` lists
   algorithms/<name>/<platform>/ unpacked bundles, one tree per build
+  models/<uid>/                 models imported from another machine
 ```
 
+`algorithms/` is a cache — everything in it can be fetched again, and deleting it costs a
+download. `models/` is not: an imported model exists on the machine that built it and on the ones
+you carried it to, so `siar-app export` it before you clear anything.
+
 The one file outside that directory is `~/.siar-build/models.db`, and it belongs to `siar-build`.
-The library reads it and never writes it: no row is added, and the file is never created by being
-looked for.
+The library reads it and never writes it: no row is added, the file is never created by being
+looked for, and `siar-app import` does not put anything in it either.
 
 
 **Exit codes.** 0 on success, 1 on a handled failure — a bad folder, an expired token, a run

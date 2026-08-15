@@ -346,6 +346,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--verbose", "-v", action="store_true",
                          help="log one line per request")
 
+    p_export = sub.add_parser(
+        "export",
+        help="write a model built here to one file another machine can import",
+        description="Put a model you built with siar-build — its package, its bots and the "
+        "figures it was calibrated on — into a single .siarmodel file. Copy that file to "
+        "another machine and `siar-app import` it there. Downloaded algorithms cannot be "
+        "exported: they are licensed per machine, and that machine fetches its own. With no "
+        "name, lists what could be exported.",
+    )
+    p_export.add_argument("model", nargs="?", metavar="NAME",
+                          help="the model to export (its name in `siar-app lib`)")
+    p_export.add_argument("--out", metavar="PATH",
+                          help="file to write, or a folder to write it into "
+                               "(default: <name>-<version>.siarmodel here)")
+
+    p_import = sub.add_parser(
+        "import",
+        help="unpack a model bundle exported from another machine",
+        description="Install a .siarmodel written by `siar-app export`. It lands in this "
+        "machine's workspace, appears in `siar-app lib` with the bots and corpus it came off, "
+        "and is runnable by name with `siar-app run -a <name>`. Nothing in the bundle is "
+        "executed by this command. With no file, lists the models already imported here.",
+    )
+    p_import.add_argument("bundle", nargs="?", metavar="FILE", help="the .siarmodel to import")
+    p_import.add_argument("--into", metavar="DIR",
+                          help="unpack somewhere other than the workspace (not listed in lib)")
+    p_import.add_argument("--inspect", action="store_true",
+                          help="print what the bundle says about itself and import nothing")
+
     p_runs = sub.add_parser("runs", help="list the scans run from this machine")
     p_runs.add_argument("--limit", type=int, default=20, metavar="N")
     p_runs.add_argument("--json", action="store_true")
@@ -368,6 +397,8 @@ _DISPATCH = {
     "whoami": commands.cmd_whoami,
     "algorithms": commands.cmd_algorithms,
     "installed": commands.cmd_installed,
+    "export": commands.cmd_export,
+    "import": commands.cmd_import,
     "feedback": commands.cmd_feedback,
     "scan": commands.cmd_scan,
     "run": commands.cmd_run,
