@@ -14,7 +14,10 @@ Three panes, top to bottom, and the order is the decision being made:
 * **Models** — the downloaded bundles, the models built here with ``siar-build``, and the ones
   carried here from another machine, together. :mod:`siarapp.library` is what merges the three;
   nothing here knows how any of them got onto the disk. ``e`` and ``m`` are how the third kind
-  moves: export the selected model to one file, or import one somebody brought.
+  moves: export the selected model to one file, or import one somebody brought. ``n`` renames
+  one — the ones this machine owns, which is what ``LOOKS FOR`` being its own column is about: a
+  model can be called anything, and what it *detects* is a separate fact that a rename must not
+  touch.
 * **Bots** — the programs a built model came out of, champion first, and what each one reads. A
   downloaded bundle has none to show and says so: what is inside it is the closed side of the
   seam, and a screen that implied otherwise would be lying about the product.
@@ -69,7 +72,13 @@ from siarapp.io.audio import count_recordings, find_recordings, is_audio, probe
 from siarapp.library import Model, feature_usage, library
 from siarapp.loader import load_cached, load_local
 from siarapp.runner import DEFAULT_MAX_BYTES, RunOptions
-from siarapp.transfer import BUNDLE_SUFFIX, TransferError, export_model, import_bundle
+from siarapp.transfer import (
+    BUNDLE_SUFFIX,
+    TransferError,
+    export_model,
+    import_bundle,
+    rename_bundle,
+)
 
 __all__ = ["Form", "Library", "Picker", "complete_path", "render", "run"]
 
@@ -630,7 +639,7 @@ class Library:
     """
 
     __slots__ = ("models", "runs", "cursor", "program_cursor", "focus", "form", "picker",
-                 "message", "message_kind", "counting")
+                 "message", "message_kind", "counting", "naming", "buffer")
 
     def __init__(self, models: list[Model] | None = None, form: Form | None = None,
                  runs: list[dict] | None = None) -> None:
@@ -644,6 +653,8 @@ class Library:
         self.message = ""
         self.message_kind = "ok"
         self.counting: Callable[[int], None] | None = None
+        self.naming = False
+        self.buffer = ""
 
     # -- state ---------------------------------------------------------------------------------
 
@@ -770,6 +781,71 @@ class Library:
         self.say(f"imported {row['slug']} from {origin} — {len(row['programs'])} bot(s), "
                  f"{human_bytes(row['bytes'])}")
 
+    def start_naming(self) -> None:
+        """Begin renaming the selected model, with its current name in the field to edit.
+
+        Offered for a model this machine owns — one imported here. A model built here is
+        siar-build's row in siar-build's database, which this package reads and never writes, so
+        the answer there is a sentence pointing at the program that can.
+        """
+        model = self.model()
+        if model is None:
+            return
+        if not model.imported:
+            self.say(
+                f"{model.slug} is "
+                + ("a downloaded bundle — its name is the server's"
+                   if not model.local else
+                   f"a model built here; rename it where it lives: "
+                   f"`siar-build name {model.detail.get('id', '<id>')} <new name>`"),
+                "warn")
+            return
+        self.naming = True
+        self.buffer = model.slug
+        self.say("")
+
+    def type(self, char: str) -> None:
+        """One character into the name being typed."""
+        if self.naming and char.isprintable():
+            self.buffer += char
+
+    def backspace(self) -> None:
+        """Delete the character before the cursor. On an empty field, stop renaming."""
+        if not self.naming:
+            return
+        if self.buffer:
+            self.buffer = self.buffer[:-1]
+        else:
+            self.naming = False
+
+    def cancel_naming(self) -> None:
+        """Abandon the rename and go back to the list."""
+        self.naming = False
+        self.buffer = ""
+
+    def commit_name(self) -> None:
+        """Rename the selected model to what was typed.
+
+        The list is read again rather than the cell edited: a name is what several other things
+        are matched by, and a screen that edited the one it was showing would be the place they
+        disagreed.
+        """
+        model = self.model()
+        typed, self.naming, self.buffer = self.buffer.strip(), False, ""
+        if model is None or not model.imported or not typed:
+            return
+        old = model.slug
+        try:
+            row = rename_bundle(str(model.detail.get("uid") or ""), typed)
+        except TransferError as e:
+            self.say(str(e), "error")
+            return
+        keep = self.cursor
+        self.load()
+        self.cursor = min(keep, max(0, len(self.models) - 1))
+        self.follow_model()
+        self.say(f"{old} → {row['slug']}" if old != row["slug"] else "the name is unchanged")
+
     def give(self) -> None:
         """Export the selected model into the working directory."""
         model = self.model()
@@ -812,8 +888,13 @@ class Library:
 
 
 #: Header and cells go through one renderer, so the columns are measured rather than counted.
-_MODEL_HEADERS = ("NAME", "WHERE FROM", "VERSION", "RUNS ON", "SIZE", "WHEN", "BOTS", "RUNS HERE")
-_MODEL_ALIGN = ("<", "<", "<", "<", ">", "<", ">", "<")
+#: NAME and LOOKS FOR are two columns because they are two facts. A model is *called* something —
+#: chosen when it was built, changeable with ``n``, and unique because siar-build tags it — and it
+#: *detects* something, which is the label its boxes carry and is not anybody's to choose after
+#: the corpus was labelled.
+_MODEL_HEADERS = ("NAME", "LOOKS FOR", "WHERE FROM", "VERSION", "RUNS ON", "SIZE", "WHEN", "BOTS",
+                  "RUNS HERE")
+_MODEL_ALIGN = ("<", "<", "<", "<", "<", ">", "<", ">", "<")
 _BOT_HEADERS = ("#", "KIND", "FITNESS", "THRESHOLD", "NODES", "DEPTH", "READS")
 _BOT_ALIGN = (">", "<", ">", ">", ">", ">", "<")
 
@@ -843,6 +924,7 @@ def _model_rows(models: list[Model]) -> list[list[str]]:
     return [
         [
             model.slug,
+            model.looks_for or "—",
             _where_from(model),
             model.version or "—",
             "this machine" if model.platform == "source" else model.platform,
@@ -1071,9 +1153,9 @@ def _title(lib: Library, width: int) -> str:
 #: What the footer offers, in the order somebody needs it — and the same list for a terminal too
 #: narrow to hold it, cut to the keys that cannot be guessed. A footer whose right-hand end is
 #: clipped is one that stops mentioning how to leave.
-_KEYS = ("↑↓ select  tab pane  enter run  i scan  o out  p parallel  e/m export/import  "
+_KEYS = ("↑↓ select  tab pane  enter run  i/o/p rows  n rename  e/m export/import  "
          "R reload  q quit")
-_NARROW_KEYS = "↑↓ tab enter  i/o/p rows  e/m export/import  q quit"
+_NARROW_KEYS = "↑↓ tab enter  i/o/p rows  n rename  e/m move  q quit"
 
 #: Width below which the short list is used.
 _NARROW = 96
@@ -1091,7 +1173,12 @@ def _bottom(lib: Library, width: int) -> list[str]:
         colours = {"ok": GREEN, "warn": YELLOW, "error": RED}
         lines.append(paint(f" {lib.message}", colours.get(lib.message_kind, GREEN)))
     lines.append(_rule(width))
-    lines.append(paint(" " + (_KEYS if width >= _NARROW else _NARROW_KEYS), DIM))
+    if lib.naming:
+        lines.append(paint(f" name  {lib.buffer}", CYAN) + paint("▏", BOLD)
+                     + paint("   enter rename   esc cancel   "
+                             "(what it detects does not change)", DIM))
+    else:
+        lines.append(paint(" " + (_KEYS if width >= _NARROW else _NARROW_KEYS), DIM))
     return lines
 
 
@@ -1257,6 +1344,21 @@ def _handle_key(lib: Library, key: str) -> str:
         _handle_picker(lib, key)
         return ""
 
+    if lib.naming:
+        # Every key is text while a name is being typed, or the letters of the name would be the
+        # screen's own shortcuts and typing "q" would leave rather than be typed.
+        if key == "escape":
+            lib.cancel_naming()
+        elif key == "enter":
+            lib.commit_name()
+        elif key == "backspace":
+            lib.backspace()
+        elif key == "space":
+            lib.type(" ")
+        elif len(key) == 1:
+            lib.type(key)
+        return ""
+
     if key in ("q", "Q", "eof"):
         return "quit"
     if key in ("up", "k"):
@@ -1277,6 +1379,8 @@ def _handle_key(lib: Library, key: str) -> str:
     elif key == "p":
         lib.focus, lib.form.cursor = "run", _RUN_ROWS.index("parallel")
         lib.form.toggle_parallel()
+    elif key == "n":
+        lib.start_naming()
     elif key == "e":
         lib.give()
     elif key == "m":

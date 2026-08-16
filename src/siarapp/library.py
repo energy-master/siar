@@ -180,6 +180,43 @@ class Model:
         return self.source in LOCAL_SOURCES
 
     @property
+    def shapes(self) -> tuple[str, ...]:
+        """The structures this model emits — what its boxes are labelled, target first.
+
+        Not the same question as what the model is *called*, and since a model can be named
+        anything the two have to be asked separately. A downloaded bundle declares its shapes in
+        its manifest; a built or imported one has the target it was evolved for, and the other
+        tags that counted as that target.
+        """
+        declared = self.detail.get("shapes")
+        if isinstance(declared, (list, tuple)) and declared:
+            return tuple(str(s) for s in declared)
+        target = str(self.detail.get("target") or "")
+        tags = self.detail.get("positive_tags")
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags or "[]")
+            except ValueError:
+                tags = []
+        others = [str(t) for t in tags if str(t) != target] if isinstance(tags, list) else []
+        if not target:
+            return tuple(others)
+        return (target, *others)
+
+    @property
+    def looks_for(self) -> str:
+        """What this model detects, as one cell: the first shape, and how many others there are.
+
+        ``""`` when nothing on this machine knows — a bundle whose manifest declares no shapes,
+        or a build row from before the column existed. A blank is the honest answer there; a
+        guess would be a label on somebody's boxes that nothing put there.
+        """
+        shapes = self.shapes
+        if not shapes:
+            return ""
+        return f"{shapes[0]} +{len(shapes) - 1}" if len(shapes) > 1 else shapes[0]
+
+    @property
     def features(self) -> tuple[str, ...]:
         """Every feature any of this model's programs reads, in first-seen order.
 
@@ -218,7 +255,8 @@ def downloaded_models() -> list[Model]:
             stamped_at=int(row.get("downloaded_at") or 0),
             runnable=runnable,
             note="" if runnable else f"built for {row.get('platform')}, not this machine",
-            detail={"family": str(row.get("family") or "")},
+            detail={"family": str(row.get("family") or ""),
+                    "shapes": list(row.get("shapes") or ())},
         ))
     return models
 
@@ -324,7 +362,8 @@ def _programs(conn: sqlite3.Connection, build_id: int) -> list[Program]:
 #: Columns copied from a build row into :attr:`Model.detail`. Everything the library screen says
 #: about a build comes from this list, so adding a fact to the panel is adding a name here.
 _BUILD_DETAIL = (
-    "id", "target", "created_at", "input_dir", "output_dir", "package_dir", "objective",
+    "id", "target", "positive_tags", "created_at", "input_dir", "output_dir", "package_dir",
+    "objective",
     "selection", "pop_size", "generations", "seed", "sample_rate", "n_fft", "hop", "n_bins",
     "fmin_hz", "fmax_hz", "held_out_auc", "held_out_auc_recording", "in_corpus_auc", "train_auc",
     "null_auc", "suspect", "parity_ok", "parity_max_delta", "test_recordings", "seconds",

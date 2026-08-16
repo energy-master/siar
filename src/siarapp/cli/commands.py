@@ -576,11 +576,14 @@ def cmd_installed(args: Namespace) -> int:
         print("`siar-app algorithms` lists what you can run; the first `run` fetches one.")
         return 0
 
-    headers = ["NAME", "VERSION", "PLATFORM", "SIZE", "DOWNLOADED", "RUNS HERE"]
-    align = ["<", "<", "<", ">", "<", "<"]
+    headers = ["NAME", "LOOKS FOR", "VERSION", "PLATFORM", "SIZE", "DOWNLOADED", "RUNS HERE"]
+    align = ["<", "<", "<", "<", ">", "<", "<"]
     table = [
         [
             r["slug"],
+            # What it emits, which stopped being the same thing as what it is called the moment
+            # models could be named. A bundle that declares no shapes gets a dash, not a guess.
+            _shapes_cell(r.get("shapes")),
             r["version"],
             r["platform"],
             human_bytes(r["bytes"]),
@@ -602,6 +605,14 @@ def cmd_installed(args: Namespace) -> int:
     if args.check and any(row[-1].endswith("available") for row in table):
         print("`siar-app run --refresh -a <name>` replaces a cached bundle with the newest.")
     return 0
+
+
+def _shapes_cell(shapes) -> str:
+    """The structures a bundle declares, as one cell: the first, and how many others."""
+    names = [str(s) for s in (shapes or ())]
+    if not names:
+        return "—"
+    return f"{names[0]} +{len(names) - 1}" if len(names) > 1 else names[0]
 
 
 def _version_status(local: str, server: str | None) -> str:

@@ -52,6 +52,7 @@ __all__ = [
     "import_bundle",
     "installed_bundles",
     "remove_bundle",
+    "rename_bundle",
 ]
 
 #: What an exported model is called. A suffix of its own rather than ``.tar.gz`` so that the
@@ -305,6 +306,48 @@ def installed_bundles() -> list[dict]:
         rows.append(_row(directory, record))
     rows.sort(key=lambda r: (-r["imported_at"], r["slug"]))
     return rows
+
+
+def rename_bundle(uid: str, new_name: str) -> dict:
+    """Rename an imported model on this machine.
+
+    Only the name is touched — the record's, which is what the library lists, what
+    :func:`siarapp.library.local_model` matches and what a run is labelled with. The package
+    directory is left exactly as it arrived, because renaming it would mean rewriting somebody
+    else's generated source, and this package runs models rather than writing them. It costs
+    nothing: :func:`siarapp.loader.load_local` is given the name explicitly and the name inside
+    the package is only ever a fallback.
+
+    Renaming what is *not* on this side of the seam is not offered at all. A model built here is
+    siar-build's row in siar-build's database, opened read-only for the reason set out in
+    :mod:`siarapp.library`; ``siar-build name`` renames those, and the screen says so rather than
+    quietly editing another program's workspace.
+
+    Args:
+        uid: The model's uid, as :func:`installed_bundles` reports it.
+        new_name: What to call it. Reduced to something a slug can be.
+
+    Returns:
+        The updated row.
+
+    Raises:
+        TransferError: If there is no imported model with that uid, the name is empty, or the
+            record cannot be written.
+    """
+    slug = _safe(new_name).strip("._-")
+    if not slug:
+        raise TransferError("a model needs a name")
+    root = os.path.join(imported_dir(), _safe(uid))
+    path = os.path.join(root, "import.json")
+    record = read_json(path, None)
+    if not isinstance(record, dict):
+        raise TransferError(f"no imported model with uid {uid}")
+    record["slug"] = slug
+    try:
+        write_json(path, record)
+    except OSError as e:
+        raise TransferError(f"could not write {path}: {e.strerror or e}") from e
+    return _row(root, record)
 
 
 def remove_bundle(uid: str) -> bool:

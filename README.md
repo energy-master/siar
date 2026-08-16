@@ -87,11 +87,12 @@ Or type `siar-app` on its own and do the same thing on one screen.
 can run, and the form that runs it.
 
 ```
-siar-app  library   5 downloaded · 1 built here · 6 bots · 6 features
+siar-app  library   5 downloaded · 1 built here · 1 imported · 6 bots · 6 features
 ────────────────────────────────────────────────────────────────────────────────────────────────
-   NAME                      WHERE FROM  VERSION  RUNS ON                  SIZE  WHEN         BOTS
-   all_structures            downloaded  1.0.0    linux-x86_64-cp313    1.0 MiB  2026-08-10      —
- ▸ recall                    built here  0.1.0    this machine        140.6 KiB  2026-08-15      6
+   NAME             LOOKS FOR  WHERE FROM      VERSION  RUNS ON              SIZE  WHEN     BOTS
+   all_structures   sweep +4   downloaded      1.0.0    linux-x86_64-cp313  1.0 M  08-10       —
+ ▸ recall_a7f3k2    recall +3  built here      0.1.0    this machine        140 K  08-15       6
+   porpoise_b8c4m1  porpoise   from endeavour  0.1.0    this machine        603 K  08-16       6
 ────────────────────────────────────────────────────────────────────────────────────────────────
    #  KIND       FITNESS  THRESHOLD  NODES  DEPTH  READS
  ▸ 0  champion    0.9899    -0.3674     15      8  ratio_5350_5700hz_over_total, contrast_5700…
@@ -110,7 +111,7 @@ RUN
    parallel  auto — one worker per core, as many as this machine's memory will hold
  ▸ ▶ start   run recall now
 ────────────────────────────────────────────────────────────────────────────────────────────────
- ↑↓ select  tab pane  enter run  i scan  o out  p parallel  e/m export/import  R reload  q quit
+ ↑↓ select  tab pane  enter run  i/o/p rows  n rename  e/m export/import  R reload  q quit
 ```
 
 Three kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches
@@ -125,6 +126,23 @@ one, and [moving a model](#7-move-a-model-to-another-machine) is a section of it
 
 A downloaded bundle has no bots to show, and says so. What is inside it is licensed separately and
 stays inside it — that split is the whole design, and the library does not pretend otherwise.
+
+**NAME and LOOKS FOR are two facts, not one.** A model is *called* something — `recall_a7f3k2`,
+what you pass to `run -a`, what every box in an output folder is filed under — and it *detects*
+something, which is the label those boxes carry. They used to be the same string, and stopped
+being one when [`siar-build`](https://github.com/energy-master/siar-build) started naming models:
+a build tags every name so that two models of one target are never one name, and `+3` in LOOKS FOR
+means three other tags counted as the target as well.
+
+`n` renames whichever model is selected, with the current name in the field to edit. It changes
+what the model is *called* and nothing else — same package, same boxes, same label on them. What
+you can rename is what this machine owns:
+
+| | |
+|---|---|
+| **imported** | yes. It lives in this machine's workspace and the name is this machine's record of it. |
+| **built here** | no — `siar-build name <id> <new name>`. The row is siar-build's, in siar-build's database, which siar-app reads and never writes; the screen says so rather than editing another program's workspace behind its back. |
+| **downloaded** | no. The name is the server's, and the next `--refresh` would put it back. |
 
 **Paths are pointed at, not typed.** `i` and `o` open a browser over the folder that row is
 already pointing at: folders and recordings, <kbd>enter</kbd> to open one, <kbd>←</kbd> to go back
@@ -149,6 +167,7 @@ and the run in the history at the bottom of the screen.
 | <kbd>enter</kbd> | open the browser on a path row, toggle `parallel`, or start the run |
 | `i` / `o` | choose what to scan / where to write |
 | `p` | parallel off or auto |
+| `n` | rename the selected model (the ones this machine owns — see below) |
 | `e` | export the selected model to a `.siarmodel` file here |
 | `m` | import a `.siarmodel` somebody gave you |
 | `R` | re-read the algorithm cache, siar-build's index and the run history |
@@ -830,9 +849,9 @@ are not offered it at all.
 Which models and what version are installed on this machine. `algorithms` lets you have a peek at which models are available to you.
 ```bash
 $ siar-app installed
-NAME                      VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE
-------------------------  -------  ------------------  -------  ----------------  ---------
-all_structures            1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18  yes
+NAME                      LOOKS FOR  VERSION  PLATFORM               SIZE  DOWNLOADED        RUNS HERE
+------------------------  ---------  -------  ------------------  -------  ----------------  ---------
+all_structures            sweep +4   1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18  yes
 
 1 bundle(s), 1.0 MiB in /home/you/.siar-app/algorithms
 ```
@@ -842,6 +861,10 @@ all_structures            1.0.0    linux-x86_64-cp313  1.0 MiB  2026-08-10 12:18
 | `--check` | also ask the server whether a newer version is published |
 | `--json` | the raw list, including each bundle's path on disk |
 | `--server URL` | which install `--check` asks |
+
+`LOOKS FOR` is what the bundle declares it emits — the first shape, then `+N` for the rest. It is
+not the same question as `NAME`: what a model is called and what it detects are two facts, and a
+bundle that declares no shapes gets a dash rather than a guess.
 
 
 With `--check` a `SERVER` column appears:
@@ -935,6 +958,11 @@ off.
 | `--platform TAG` | download the build for another platform tag instead of this machine's |
 | `--refresh` | re-download even if the bundle is already cached |
 | `--server URL` | which install to download from |
+
+`-a NAME` looks on **this machine first** — a model built here with `siar-build`, or imported from
+another machine — and asks the server only when no local model has that name. So a model you just
+imported is run by name, with no `--algorithm-path` anywhere, and the run says which one it used
+and where it came from. `--algorithm-path` still wins over both.
 
 **Analysis grid** — defaults come from the algorithm which carries the grid it was tuned at.
 Override only if you know why.

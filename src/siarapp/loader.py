@@ -404,7 +404,8 @@ def installed_algorithms() -> list[dict]:
 
     Returns:
         One dict per build with ``slug``, ``platform``, ``version``, ``family``, ``title``,
-        ``bytes``, ``downloaded_at`` (epoch seconds), ``runnable`` and ``root``. Incomplete
+        ``shapes``, ``bytes``, ``downloaded_at`` (epoch seconds), ``runnable`` and ``root``.
+        Incomplete
         directories — an interrupted unpack — are skipped, because they are not installed.
     """
     root_dir = os.path.join(home(), "algorithms")
@@ -427,6 +428,11 @@ def installed_algorithms() -> list[dict]:
                 "platform": build_tag,
                 "version": str(manifest.get("version") or "?"),
                 "family": str(manifest.get("family") or ""),
+                # What the bundle says it emits. The one thing about a closed algorithm's insides
+                # that it is *for* telling you, and the answer to "what does this one look for"
+                # for a bundle that has no build row to read it off.
+                "shapes": tuple(str(s) for s in (manifest.get("shapes") or ())
+                                if isinstance(s, (str, int, float))),
                 "title": str(manifest.get("title") or ""),
                 "bytes": _tree_bytes(tree),
                 "downloaded_at": _stamped_at(tree),

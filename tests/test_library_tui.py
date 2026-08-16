@@ -528,3 +528,85 @@ def test_a_bundle_that_is_not_one_is_a_message_and_not_a_traceback(workspace):
 
     assert "not a readable model bundle" in lib.message
     assert lib.message_kind == "error"
+
+
+# -- what a model is called ---------------------------------------------------------------------
+
+
+def test_a_model_says_what_it_looks_for_as_well_as_what_it_is_called(workspace):
+    """Once a model can be named anything, the listing has to say what it detects."""
+    built = _packaged(workspace / "built")
+    built.detail = {"target": "recall", "positive_tags": '["recall", "recall_nb"]'}
+    bundle = tui.Model(source="downloaded", slug="all_structures", runnable=True,
+                       detail={"shapes": ["sweep", "click"]})
+
+    rows = {row[0]: row[1] for row in tui._model_rows([built, bundle])}
+
+    assert rows["thing"] == "recall +1", "the target, and the tags that counted as it"
+    assert rows["all_structures"] == "sweep +1", "a bundle declares its shapes in its manifest"
+
+
+def test_renaming_an_imported_model_changes_what_it_is_called_and_nothing_else(workspace):
+    lib = _library(models=[_packaged(workspace / "built")])
+    tui._handle_key(lib, "e")
+    lib.take(str(next(iter(workspace.glob("*.siarmodel")))))
+    before = lib.model()
+
+    tui._handle_key(lib, "n")
+    assert lib.naming and lib.buffer == before.slug, "the current name is there to edit"
+    for _ in before.slug:
+        lib.backspace()
+    for char in "porpoise":
+        lib.type(char)
+    tui._handle_key(lib, "enter")
+
+    after = lib.model()
+    assert not lib.naming
+    assert after.slug == "porpoise" and after.imported
+    assert after.looks_for == before.looks_for, "what it detects did not change"
+    assert after.path == before.path, "and it is the same package on disk"
+
+
+def test_the_renamed_model_is_the_one_a_run_finds_by_that_name(workspace):
+    from siarapp.library import local_model
+
+    lib = _library(models=[_packaged(workspace / "built")])
+    tui._handle_key(lib, "e")
+    lib.take(str(next(iter(workspace.glob("*.siarmodel")))))
+    lib.naming, lib.buffer = True, "porpoise"
+    lib.commit_name()
+
+    assert local_model("porpoise") is not None
+    assert local_model("thing") is None, "and not under the name it arrived with"
+
+
+def test_a_model_built_here_is_renamed_where_it_lives(workspace):
+    """siar-app reads siar-build's index and never writes it, so it says who can."""
+    lib = _library(models=[_built()])
+
+    tui._handle_key(lib, "n")
+
+    assert not lib.naming
+    assert "siar-build name" in lib.message
+    assert lib.message_kind == "warn"
+
+
+def test_a_downloaded_bundles_name_is_not_this_machines_to_change(workspace):
+    lib = _library(models=[_downloaded()])
+
+    tui._handle_key(lib, "n")
+
+    assert not lib.naming and "the server's" in lib.message
+
+
+def test_typing_a_name_does_not_trigger_the_screens_own_keys(workspace):
+    """"q" in a name must be a letter, not the end of the session."""
+    lib = _library(models=[_packaged(workspace / "built")])
+    tui._handle_key(lib, "e")
+    lib.take(str(next(iter(workspace.glob("*.siarmodel")))))
+    tui._handle_key(lib, "n")
+    lib.buffer = ""
+
+    for char in "quiet":
+        assert tui._handle_key(lib, char) == "", "no key typed into a name may act"
+    assert lib.buffer == "quiet"
