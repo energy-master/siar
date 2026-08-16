@@ -28,6 +28,7 @@ import pytest
 
 from siarapp.cli import library_tui as tui
 from siarapp.cli.format import set_colour, visible_len
+from siarapp import library as tui_library
 from siarapp.library import Model, Program
 
 
@@ -69,6 +70,19 @@ def _library(models=None, runs=None):
     lib = tui.Library(models=models if models is not None else [_downloaded(), _built()],
                       runs=runs or [], form=tui.Form(input="/audio", out="/out"))
     return lib
+
+
+def _one_target_library(runs=None):
+    """Two models that detect the same thing, so both sit in the models pane at once.
+
+    The default fixture deliberately does not: a downloaded bundle declaring no shapes and a build
+    for ``recall`` are two targets, which is the normal shape of a library and what the targets
+    pane exists to separate. A test about moving down the *models* needs them under one.
+    """
+    bundle = _downloaded()
+    bundle.detail = {"family": "structure_scanners", "shapes": ["recall"]}
+    return tui.Library(models=[bundle, _built()], runs=runs or [],
+                       form=tui.Form(input="/audio", out="/out"))
 
 
 #: Sizes every layout assertion is made at: a normal terminal, a small one, the floor
@@ -155,9 +169,31 @@ def test_the_history_fills_a_tall_terminal_rather_than_leaving_it_blank():
 # -- the keys ---------------------------------------------------------------------------------
 
 
+def test_the_screen_opens_on_the_targets():
+    """The first question is what to look for, not which of the models to look with."""
+    lib = _library()
+
+    assert lib.focus == "targets"
+    assert [group.name for group in lib.targets] == ["recall", tui_library.UNKNOWN_TARGET]
+    assert lib.target_name() == "recall"
+    assert [m.slug for m in lib.models] == ["recall"], "and only that target's models"
+
+
+def test_choosing_a_target_changes_which_models_are_offered():
+    lib = _library()
+
+    tui._handle_key(lib, "down")
+
+    assert lib.target_name() == tui_library.UNKNOWN_TARGET
+    assert [m.slug for m in lib.models] == ["all_structures"]
+    assert lib.cursor == 0 and lib.program_cursor == 0, "and what hung off the old one is reset"
+
+
 def test_tab_moves_between_the_panes_and_skips_bots_when_there_are_none():
     lib = _library(models=[_downloaded()])
 
+    tui._handle_key(lib, "tab")
+    assert lib.focus == "models"
     tui._handle_key(lib, "tab")
 
     assert lib.focus == "run", "a pane with nothing in it is not a place to put the cursor"
@@ -167,12 +203,14 @@ def test_tab_stops_at_the_bots_of_a_model_that_has_some():
     lib = _library(models=[_built()])
 
     tui._handle_key(lib, "tab")
+    assert lib.focus == "models"
+    tui._handle_key(lib, "tab")
 
     assert lib.focus == "bots"
 
 
 def test_moving_down_the_models_resets_the_bot_selection():
-    lib = _library()
+    lib = _one_target_library()
     lib.focus = "bots"
     lib.program_cursor = 1
     lib.focus = "models"
@@ -183,10 +221,12 @@ def test_moving_down_the_models_resets_the_bot_selection():
 
 
 def test_the_output_folder_follows_the_model_until_it_is_chosen():
-    lib = tui.Library(models=[_downloaded(), _built()], form=tui.Form())
+    lib = _one_target_library()
+    lib.form = tui.Form()
     lib.follow_model()
     followed = lib.form.out
 
+    lib.focus = "models"
     tui._handle_key(lib, "down")
     assert lib.form.out != followed and lib.form.out.endswith("recall-scan")
 
@@ -533,6 +573,45 @@ def test_a_bundle_that_is_not_one_is_a_message_and_not_a_traceback(workspace):
 # -- what a model is called ---------------------------------------------------------------------
 
 
+def test_every_panel_says_what_its_rows_are():
+    """Four lists of numbers on one screen are four lists of numbers until each is named."""
+    frame = "\n".join(tui.render(_library(), 140, 44))
+
+    for title in ("TARGETS", "MODELS", "BOTS"):
+        assert title in frame
+
+
+def test_a_bot_is_listed_by_the_name_it_answers_to():
+    lib = _library(models=[_built(programs=[
+        Program(rank=0, name="recall_a7f3k2_vxbot", kind="champion", threshold=0.5),
+        Program(rank=1, name="recall_m4x9p2_vxbot", kind="runner_up", threshold=None),
+    ])])
+
+    names = [row[tui._BOT_HEADERS.index("BOT")] for row in tui._bot_rows(lib.programs())]
+
+    assert names == ["recall_a7f3k2_vxbot", "recall_m4x9p2_vxbot"]
+
+
+def test_a_bot_from_before_bots_had_names_shows_its_rank():
+    """A position in a listing is what it had, and it should read as one rather than as blank."""
+    assert Program(rank=3, kind="runner_up").label == "#3"
+
+
+def test_a_model_names_the_run_it_came_out_of():
+    """A model renamed after the fact is still traceable to the search that produced it."""
+    built = _built()
+    built.detail = {**built.detail, "run_name": "recall_q3w8n5_vxrun"}
+
+    row = tui._model_rows([built])[0]
+
+    assert row[tui._MODEL_HEADERS.index("FROM RUN")] == "recall_q3w8n5_vxrun"
+    assert row[tui._MODEL_HEADERS.index("NAME")] == "recall", "which is not the model's own name"
+
+
+def test_a_downloaded_bundle_names_no_run_because_it_knows_of_none():
+    assert tui._model_rows([_downloaded()])[0][tui._MODEL_HEADERS.index("FROM RUN")] == "—"
+
+
 def test_a_model_says_what_it_looks_for_as_well_as_what_it_is_called(workspace):
     """Once a model can be named anything, the listing has to say what it detects."""
     built = _packaged(workspace / "built")
@@ -540,7 +619,8 @@ def test_a_model_says_what_it_looks_for_as_well_as_what_it_is_called(workspace):
     bundle = tui.Model(source="downloaded", slug="all_structures", runnable=True,
                        detail={"shapes": ["sweep", "click"]})
 
-    rows = {row[0]: row[1] for row in tui._model_rows([built, bundle])}
+    looks_for = tui._MODEL_HEADERS.index("LOOKS FOR")
+    rows = {row[0]: row[looks_for] for row in tui._model_rows([built, bundle])}
 
     assert rows["thing"] == "recall +1", "the target, and the tags that counted as it"
     assert rows["all_structures"] == "sweep +1", "a bundle declares its shapes in its manifest"

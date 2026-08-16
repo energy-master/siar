@@ -164,6 +164,37 @@ def test_feature_usage_of_downloaded_models_is_empty(tmp_path, package):
     assert library.feature_usage(models) == []
 
 
+def test_an_index_without_the_name_columns_still_lists_its_bots(tmp_path, package):
+    """siar-build's database belongs to another program; a column it has not got is a blank."""
+    model = library.built_models(_index(tmp_path / "models.db", package_dir=str(package)))[0]
+
+    assert model.run_name == "", "and nothing here invents one"
+    assert [p.name for p in model.programs] == ["", ""]
+    assert [p.label for p in model.programs] == ["#0", "#1"], "a rank reads as the rank it is"
+
+
+def test_models_group_under_what_they_detect(tmp_path, package):
+    built = library.built_models(_index(tmp_path / "models.db", package_dir=str(package)))
+    bundle = library.Model(source=library.DOWNLOADED, slug="sweeps", stamped_at=10,
+                           detail={"shapes": ["sweep"]})
+    nameless = library.Model(source=library.DOWNLOADED, slug="mystery", stamped_at=5)
+
+    groups = library.targets(built + [bundle, nameless])
+
+    assert [g.name for g in groups] == ["recall", "sweep", library.UNKNOWN_TARGET]
+    assert groups[0].models == built
+    assert groups[0].bots == 2, "every bot across every model under that target"
+
+
+def test_a_target_counts_only_what_can_actually_be_run(tmp_path):
+    """"Two models for this call" is a different fact from "two I could scan with tonight"."""
+    models = library.built_models(_index(tmp_path / "models.db", stopped_at="evolve"))
+
+    group = library.targets(models)[0]
+
+    assert len(group.models) == 1 and group.runnable == 0
+
+
 def test_the_build_home_environment_variable_moves_the_index(tmp_path, monkeypatch):
     monkeypatch.setenv(library.BUILD_HOME_ENV, str(tmp_path / "elsewhere"))
     assert library.build_db_path() == str(tmp_path / "elsewhere" / "models.db")

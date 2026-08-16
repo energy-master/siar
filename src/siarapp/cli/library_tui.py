@@ -69,7 +69,7 @@ from siarapp.cli.tui import TuiDisplay
 from siarapp.config import recent_cost, run_history
 from siarapp.grid import ScannerError
 from siarapp.io.audio import count_recordings, find_recordings, is_audio, probe
-from siarapp.library import Model, feature_usage, library
+from siarapp.library import Model, feature_usage, library, targets
 from siarapp.loader import load_cached, load_local
 from siarapp.runner import DEFAULT_MAX_BYTES, RunOptions
 from siarapp.transfer import (
@@ -86,9 +86,11 @@ __all__ = ["Form", "Library", "Picker", "complete_path", "render", "run"]
 #: moves on its own, so this is only how quickly a resized window catches up.
 _TICK_SEC = 0.2
 
-#: The panes, in Tab order. Also the order of the decision: which model, which of its bots, and
-#: then the run.
-_PANES = ("models", "bots", "run")
+#: The panes, in Tab order. Also the order of the decision, and it starts one step further back
+#: than it used to: *what* to look for, then which model looks for it, then which of that model's
+#: bots, and then the run. A library of forty models sorted by date is forty rows with no way in;
+#: the thing a survey is actually planned around is the target.
+_PANES = ("targets", "models", "bots", "run")
 
 #: The run pane's rows. ``start`` is a row rather than a bare key binding so that "how do I
 #: actually start it" is answered by the screen instead of by the footer alone.
@@ -103,6 +105,7 @@ _PARALLEL_AUTO = 0
 
 #: Rows kept for each list before the panels below start losing lines. A list of one is not a
 #: list, and the detail under it is what the screen is for.
+_MIN_TARGET_ROWS = 2
 _MIN_MODEL_ROWS = 3
 _MIN_BOT_ROWS = 2
 
@@ -623,9 +626,12 @@ class Library:
     costs nothing and neither the algorithm cache nor siar-build's index is read again per frame.
 
     Attributes:
-        models: Everything runnable here — downloaded first, then built.
+        all_models: Everything runnable here — downloaded first, then built.
+        targets: Those models grouped by what they detect, most recent first.
+        models: The selected target's models. What the models pane draws.
         runs: This machine's run history, newest first.
-        cursor: Which model is selected.
+        target_cursor: Which target is selected.
+        cursor: Which model is selected, within that target.
         program_cursor: Which of its bots is selected.
         focus: Which pane the arrow keys move — one of :data:`_PANES`.
         form: The run form.
@@ -638,16 +644,20 @@ class Library:
             to redraw and nothing waiting to see one.
     """
 
-    __slots__ = ("models", "runs", "cursor", "program_cursor", "focus", "form", "picker",
-                 "message", "message_kind", "counting", "naming", "buffer")
+    __slots__ = ("all_models", "targets", "models", "runs", "target_cursor", "cursor",
+                 "program_cursor", "focus", "form", "picker", "message", "message_kind",
+                 "counting", "naming", "buffer")
 
     def __init__(self, models: list[Model] | None = None, form: Form | None = None,
                  runs: list[dict] | None = None) -> None:
-        self.models = list(models or [])
+        self.all_models = list(models or [])
+        self.targets = targets(self.all_models)
+        self.models: list[Model] = []
         self.runs = list(runs or [])
+        self.target_cursor = 0
         self.cursor = 0
         self.program_cursor = 0
-        self.focus = "models"
+        self.focus = "targets"
         self.form = form or Form()
         self.picker: Picker | None = None
         self.message = ""
@@ -655,6 +665,7 @@ class Library:
         self.counting: Callable[[int], None] | None = None
         self.naming = False
         self.buffer = ""
+        self._follow_target()
 
     # -- state ---------------------------------------------------------------------------------
 
@@ -663,11 +674,23 @@ class Library:
 
         All three at once, and only when something has changed — a frame is drawn several times a
         second and none of these would say anything different in between.
+
+        The selection is followed across the reload by target and then by model, because a rename
+        or an import re-orders both lists and a cursor left on an index would land on a different
+        model than the one somebody was reading.
         """
         selected = self.model()
-        self.models = library()
-        self.runs = run_history()
-        self.cursor = 0
+        wanted = self.target_name()
+        self.all_models = library()
+        self.targets = targets(self.all_models)
+
+        self.target_cursor = 0
+        for i, group in enumerate(self.targets):
+            if group.name == wanted:
+                self.target_cursor = i
+                break
+        self._follow_target()
+
         if selected is not None:
             for i, model in enumerate(self.models):
                 if model.slug == selected.slug and model.source == selected.source:
@@ -675,6 +698,21 @@ class Library:
                     break
         self.program_cursor = 0
         self.follow_model()
+
+    def _follow_target(self) -> None:
+        """Narrow the models pane to the selected target, and reset what hangs off it."""
+        self.models = self.target().models if self.targets else list(self.all_models)
+        self.cursor = 0
+        self.program_cursor = 0
+
+    def target(self):
+        """The selected target group, or ``None`` when nothing is built or downloaded."""
+        return self.targets[self.target_cursor] if self.targets else None
+
+    def target_name(self) -> str:
+        """The selected target, or ``""``."""
+        group = self.target()
+        return group.name if group is not None else ""
 
     def model(self) -> Model | None:
         """The selected model, or ``None`` when there are none."""
@@ -691,13 +729,26 @@ class Library:
         return programs[self.program_cursor] if programs else None
 
     def move(self, delta: int) -> None:
-        """Move the cursor in whichever pane has the focus."""
+        """Move the cursor in whichever pane has the focus.
+
+        Moving in a list re-points the lists below it, so a model is never shown under a target it
+        does not detect and a bot is never shown under a model it did not come from.
+        """
         if self.focus == "run":
             self.form.move(delta)
             return
         if self.focus == "bots" and self.programs():
             self.program_cursor = max(0, min(len(self.programs()) - 1,
                                              self.program_cursor + delta))
+            return
+        if self.focus == "targets":
+            if not self.targets:
+                return
+            moved = max(0, min(len(self.targets) - 1, self.target_cursor + delta))
+            if moved != self.target_cursor:
+                self.target_cursor = moved
+                self._follow_target()
+                self.follow_model()
             return
         if not self.models:
             return
@@ -708,11 +759,13 @@ class Library:
             self.follow_model()
 
     def focus_next(self, delta: int = 1) -> None:
-        """Move to the next pane, skipping the bots pane when there are no bots to move in."""
+        """Move to the next pane, skipping any list with nothing in it to move through."""
+        rows = {"targets": self.targets, "models": self.models, "bots": self.programs(),
+                "run": (True,)}
         index = _PANES.index(self.focus)
         for _ in range(len(_PANES)):
             index = (index + delta) % len(_PANES)
-            if _PANES[index] != "bots" or self.programs():
+            if rows[_PANES[index]]:
                 break
         self.focus = _PANES[index]
 
@@ -892,11 +945,15 @@ class Library:
 #: chosen when it was built, changeable with ``n``, and unique because siar-build tags it — and it
 #: *detects* something, which is the label its boxes carry and is not anybody's to choose after
 #: the corpus was labelled.
-_MODEL_HEADERS = ("NAME", "LOOKS FOR", "WHERE FROM", "VERSION", "RUNS ON", "SIZE", "WHEN", "BOTS",
-                  "RUNS HERE")
-_MODEL_ALIGN = ("<", "<", "<", "<", "<", ">", "<", ">", "<")
-_BOT_HEADERS = ("#", "KIND", "FITNESS", "THRESHOLD", "NODES", "DEPTH", "READS")
-_BOT_ALIGN = (">", "<", ">", ">", ">", ">", "<")
+_MODEL_HEADERS = ("NAME", "FROM RUN", "LOOKS FOR", "WHERE FROM", "VERSION", "RUNS ON", "SIZE",
+                  "WHEN", "BOTS", "RUNS HERE")
+_MODEL_ALIGN = ("<", "<", "<", "<", "<", "<", ">", "<", ">", "<")
+#: BOT is first because it is the name somebody types; the rank is kept beside it because it is
+#: what orders the list and what "the champion" means.
+_BOT_HEADERS = ("#", "BOT", "KIND", "FITNESS", "THRESHOLD", "NODES", "DEPTH", "READS")
+_BOT_ALIGN = (">", "<", "<", ">", ">", ">", ">", "<")
+_TARGET_HEADERS = ("TARGET", "MODELS", "RUNNABLE", "BOTS", "NEWEST")
+_TARGET_ALIGN = ("<", ">", ">", ">", "<")
 
 
 def _number(value, spec: str = ".3f", missing: str = "—") -> str:
@@ -924,6 +981,7 @@ def _model_rows(models: list[Model]) -> list[list[str]]:
     return [
         [
             model.slug,
+            model.run_name or "—",
             model.looks_for or "—",
             _where_from(model),
             model.version or "—",
@@ -937,6 +995,20 @@ def _model_rows(models: list[Model]) -> list[list[str]]:
     ]
 
 
+def _target_rows(groups: list) -> list[list[str]]:
+    """One row per target: what it is, and how much of this machine can find it."""
+    return [
+        [
+            group.name,
+            str(len(group.models)),
+            str(group.runnable),
+            str(group.bots) if group.bots else "—",
+            stamp(group.newest),
+        ]
+        for group in groups
+    ]
+
+
 def _bot_rows(programs: list) -> list[list[str]]:
     """One row per bot of the selected model."""
     rows = []
@@ -947,6 +1019,7 @@ def _bot_rows(programs: list) -> list[list[str]]:
             reads += f"  +{extra} more"
         rows.append([
             str(program.rank),
+            program.label,
             program.kind.replace("_", "-"),
             _number(program.fitness, ".4f"),
             _number(program.threshold, ".4f") if program.calibrated else "—",
@@ -1034,7 +1107,8 @@ def _bot_detail(program, width: int) -> list[str]:
     """The selected bot's expression and calibration, wrapped to the width."""
     if program is None:
         return []
-    lines = [_heading(f"BOT — {program.kind.replace('_', '-')} #{program.rank}", width)]
+    lines = [_heading(f"BOT — {program.label}, "
+                      f"{program.kind.replace('_', '-')} #{program.rank}", width)]
     room = max(20, width - 4)
     text = program.infix
     for _ in range(2):
@@ -1135,13 +1209,19 @@ def _run_lines(lib: Library, width: int) -> list[str]:
 
 
 def _title(lib: Library, width: int) -> str:
-    """The one line that says what this machine has."""
-    downloaded = sum(1 for m in lib.models if not m.local)
-    built = sum(1 for m in lib.models if m.built)
-    imported = sum(1 for m in lib.models if m.imported)
-    bots = sum(len(m.programs) for m in lib.models)
-    features = len(feature_usage(lib.models))
-    counts = (f"{downloaded} downloaded · {built} built here · "
+    """The one line that says what this machine has.
+
+    Counted over every model rather than over the selected target's, because it is a statement
+    about the machine and not about the pane below it — a header that changed as somebody scrolled
+    the targets would be answering a different question each time it was read.
+    """
+    downloaded = sum(1 for m in lib.all_models if not m.local)
+    built = sum(1 for m in lib.all_models if m.built)
+    imported = sum(1 for m in lib.all_models if m.imported)
+    bots = sum(len(m.programs) for m in lib.all_models)
+    features = len(feature_usage(lib.all_models))
+    counts = (f"{len(lib.targets)} target{'' if len(lib.targets) == 1 else 's'} · "
+              f"{downloaded} downloaded · {built} built here · "
               # Named only when there are any: on the machine models are built on, which is most
               # of them, a permanent "0 imported" would be a column about nothing.
               + (f"{imported} imported · " if imported else "")
@@ -1182,16 +1262,27 @@ def _bottom(lib: Library, width: int) -> list[str]:
     return lines
 
 
+def _panel(title: str, note: str, *, focused: bool) -> str:
+    """One panel's title bar, saying what the rows under it are.
+
+    Four lists of numbers stacked on one screen are four lists of numbers until each is named.
+    The focused one is marked, so the arrow keys are never a guess about which list they will
+    move.
+    """
+    mark = paint("▍", CYAN) if focused else " "
+    return f"{mark}{paint(title, BOLD) if focused else title}   {paint(note, DIM)}"
+
+
 def _top(lib: Library, width: int, room: int) -> list[str]:
     """Everything above the run form, laid out into ``room`` lines.
 
-    The two lists take a third each and the detail takes the rest, with the run history filling
+    The three lists take a share each and the detail takes the rest, with the run history filling
     whatever is still spare — it is the one section with no natural length. Anything that still
-    does not fit is cut from the end, which is why the history is last and the model list is
+    does not fit is cut from the end, which is why the history is last and the targets are
     first: the order of the sections is the order they are worth keeping.
     """
     lines = [_title(lib, width), _rule(width)]
-    if not lib.models:
+    if not lib.all_models:
         return lines + [
             "",
             "  Nothing on this machine to run yet.",
@@ -1202,17 +1293,30 @@ def _top(lib: Library, width: int, room: int) -> list[str]:
         ]
 
     programs = lib.programs()
-    # Room for the two lists: what is left after this block's own fixed lines — the title, the
-    # rules and each list's header — shared a third each, with the rest going to the detail.
-    share = max(0, room - len(lines) - 3 - 2)
+    # Room for the three lists: what is left after this block's own fixed lines — the title, the
+    # rules, and each list's own title and header — shared a quarter each, with the rest going to
+    # the detail.
+    share = max(0, room - len(lines) - 3 - 6)
+    target_rows = min(len(lib.targets), max(_MIN_TARGET_ROWS, share // 4))
+    share -= target_rows
     model_rows = min(len(lib.models), max(_MIN_MODEL_ROWS, share // 3))
     share -= model_rows
     bot_rows = min(len(programs), max(_MIN_BOT_ROWS, share // 3)) if programs else 0
 
+    lines.append(_panel("TARGETS", "what this machine can find — pick one",
+                        focused=lib.focus == "targets"))
+    lines += _list_lines(_TARGET_HEADERS, _target_rows(lib.targets), _TARGET_ALIGN,
+                         lib.target_cursor, target_rows, lib.focus == "targets")
+    lines.append(_rule(width))
+
+    lines.append(_panel("MODELS", f"what can find {lib.target_name() or 'it'}",
+                        focused=lib.focus == "models"))
     lines += _list_lines(_MODEL_HEADERS, _model_rows(lib.models), _MODEL_ALIGN,
                          lib.cursor, model_rows, lib.focus == "models")
     lines.append(_rule(width))
 
+    lines.append(_panel("BOTS", "the programs behind that model — only a calibrated one can run",
+                        focused=lib.focus == "bots"))
     if programs:
         lines += _list_lines(_BOT_HEADERS, _bot_rows(programs), _BOT_ALIGN,
                              lib.program_cursor, bot_rows, lib.focus == "bots")

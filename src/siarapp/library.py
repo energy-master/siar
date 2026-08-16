@@ -84,6 +84,10 @@ class Program:
 
     Attributes:
         rank: 0 for the champion, then the runners-up in order.
+        name: What this bot is called — ``<target>_<tag>_vxbot``. The champion's is the model's
+            name too, because they are the same thing: the champion *is* what was packaged.
+            ``""`` for a bot from an index written before siar-build named them, where a rank in
+            a listing was all a runner-up ever had.
         kind: ``"champion"`` or ``"runner_up"``.
         fitness: The objective's score for this program.
         threshold: Where the decision was calibrated, or ``None`` on a runner-up — which is
@@ -96,14 +100,15 @@ class Program:
         saved_path: The model document this program was written to, or ``""`` for a runner-up.
     """
 
-    __slots__ = ("rank", "kind", "fitness", "threshold", "polarity", "n_nodes", "depth",
+    __slots__ = ("rank", "name", "kind", "fitness", "threshold", "polarity", "n_nodes", "depth",
                  "features", "infix", "saved_path")
 
-    def __init__(self, *, rank: int = 0, kind: str = "", fitness: float | None = None,
-                 threshold: float | None = None, polarity: int = 1, n_nodes: int = 0,
-                 depth: int = 0, features: tuple[str, ...] = (), infix: str = "",
-                 saved_path: str = "") -> None:
+    def __init__(self, *, rank: int = 0, name: str = "", kind: str = "",
+                 fitness: float | None = None, threshold: float | None = None, polarity: int = 1,
+                 n_nodes: int = 0, depth: int = 0, features: tuple[str, ...] = (),
+                 infix: str = "", saved_path: str = "") -> None:
         self.rank = int(rank)
+        self.name = str(name or "")
         self.kind = str(kind or "")
         self.fitness = fitness
         self.threshold = threshold
@@ -113,6 +118,12 @@ class Program:
         self.features = tuple(features)
         self.infix = str(infix or "")
         self.saved_path = str(saved_path or "")
+
+    @property
+    def label(self) -> str:
+        """What to call this bot on screen. ``#<rank>`` when nothing named it — which is a
+        position in a listing rather than a name, and reads as one."""
+        return self.name or f"#{self.rank}"
 
     @property
     def calibrated(self) -> bool:
@@ -202,6 +213,28 @@ class Model:
         if not target:
             return tuple(others)
         return (target, *others)
+
+    @property
+    def target(self) -> str:
+        """The one thing this model detects — the first of its :attr:`shapes`.
+
+        What the targets panel groups on, and what a survey is planned around. ``""`` when nothing
+        here knows, which puts the model under "unknown" rather than under a guess.
+        """
+        shapes = self.shapes
+        return shapes[0] if shapes else ""
+
+    @property
+    def run_name(self) -> str:
+        """The search this model came out of, for a model built or imported here.
+
+        Empty for a downloaded bundle, which is the honest answer: the run that produced it
+        happened on somebody else's machine and its name is not in the manifest.
+
+        A model renamed after the fact is still traceable through this, which is the whole reason
+        siar-build gives a run a name of its own rather than reusing the model's.
+        """
+        return str(self.detail.get("run_name") or "")
 
     @property
     def looks_for(self) -> str:
@@ -345,6 +378,7 @@ def _programs(conn: sqlite3.Connection, build_id: int) -> list[Program]:
     return [
         Program(
             rank=_get(row, "rank", 0),
+            name=_get(row, "name", ""),
             kind=_get(row, "kind", ""),
             fitness=_get(row, "fitness"),
             threshold=_get(row, "threshold"),
@@ -362,8 +396,8 @@ def _programs(conn: sqlite3.Connection, build_id: int) -> list[Program]:
 #: Columns copied from a build row into :attr:`Model.detail`. Everything the library screen says
 #: about a build comes from this list, so adding a fact to the panel is adding a name here.
 _BUILD_DETAIL = (
-    "id", "target", "positive_tags", "created_at", "input_dir", "output_dir", "package_dir",
-    "objective",
+    "id", "target", "run_name", "positive_tags", "created_at", "input_dir", "output_dir",
+    "package_dir", "objective",
     "selection", "pop_size", "generations", "seed", "sample_rate", "n_fft", "hop", "n_bins",
     "fmin_hz", "fmax_hz", "held_out_auc", "held_out_auc_recording", "in_corpus_auc", "train_auc",
     "null_auc", "suspect", "parity_ok", "parity_max_delta", "test_recordings", "seconds",
@@ -517,6 +551,67 @@ def library(*, db_path: str | None = None) -> list[Model]:
         The models, downloaded first, each group newest first.
     """
     return downloaded_models() + built_models(db_path) + imported_models()
+
+
+#: What a model whose target nothing on this machine knows is filed under. A word rather than a
+#: blank row, so the group is selectable and says why it exists.
+UNKNOWN_TARGET = "unknown"
+
+
+class Target:
+    """One thing this machine can detect, and everything that can detect it.
+
+    The first question about a library is not "which of these forty models" but "what can this
+    machine find" — a target is what a survey is planned around, and the models under it are the
+    attempts at it. Grouping is by :attr:`Model.target` rather than by name, because two models
+    called ``wideband`` and ``strict`` looking for the same call are one choice to make, and forty
+    rows sorted by date hide that they are.
+
+    Attributes:
+        name: The target, or :data:`UNKNOWN_TARGET`.
+        models: Every model that emits it, in the order :func:`library` returned them.
+    """
+
+    __slots__ = ("name", "models")
+
+    def __init__(self, name: str, models: list[Model]) -> None:
+        self.name = str(name)
+        self.models = list(models)
+
+    @property
+    def runnable(self) -> int:
+        """How many of these can actually be run as they stand."""
+        return sum(1 for m in self.models if m.runnable)
+
+    @property
+    def bots(self) -> int:
+        """Every bot across every model here, champions and runners-up alike."""
+        return sum(len(m.programs) for m in self.models)
+
+    @property
+    def newest(self) -> int:
+        """Epoch seconds of the most recent of them, for ordering."""
+        return max((m.stamped_at for m in self.models), default=0)
+
+
+def targets(models: list[Model]) -> list[Target]:
+    """Group models by what they detect, most recently added first.
+
+    Args:
+        models: What :func:`library` returned, or any subset.
+
+    Returns:
+        One :class:`Target` per distinct target. Ordering puts the most recently added first and
+        breaks ties by name, so two calls a second apart agree; :data:`UNKNOWN_TARGET` sorts with
+        the rest rather than being pinned anywhere, since it is a real group with real models in
+        it and pinning it would say otherwise.
+    """
+    grouped: dict[str, list[Model]] = {}
+    for model in models:
+        grouped.setdefault(model.target or UNKNOWN_TARGET, []).append(model)
+    out = [Target(name, rows) for name, rows in grouped.items()]
+    out.sort(key=lambda t: (-t.newest, t.name))
+    return out
 
 
 def feature_usage(models: list[Model]) -> list[tuple[str, int]]:
