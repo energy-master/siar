@@ -40,12 +40,14 @@ __all__ = [
     "Model",
     "Program",
     "build_db_path",
+    "SOCIETY",
     "built_models",
     "downloaded_models",
     "feature_usage",
     "imported_models",
     "library",
     "local_model",
+    "society_models",
 ]
 
 #: Moves siar-build's workspace, the way ``$SIAR_APP_HOME`` moves this one. Honoured here so a
@@ -67,10 +69,18 @@ DOWNLOADED = "downloaded"
 BUILT = "built"
 IMPORTED = "imported"
 
+#: A **society**: many bots for one target, voting. siar-build breeds these continuously and
+#: republishes as its leaderboard moves, so unlike the other three what this slug names is not a
+#: fixed program — it is whichever twenty bots were best when it last published. Listed as its own
+#: kind rather than as a build because it *is* a different thing to reason about: a downloaded
+#: bundle can be re-fetched, a built model is one search's answer, and a society is a population
+#: still being bred.
+SOCIETY = "society"
+
 #: The sources whose models are a package on this disk, loaded with
 #: :func:`siarapp.loader.load_local` rather than fetched. Built here or carried here — from the
 #: loader's point of view those are the same thing, and only these two can be exported.
-LOCAL_SOURCES = (BUILT, IMPORTED)
+LOCAL_SOURCES = (BUILT, IMPORTED, SOCIETY)
 
 
 class Program:
@@ -135,7 +145,7 @@ class Model:
     """One thing this machine can run, whichever way it got here.
 
     Attributes:
-        source: :data:`DOWNLOADED` or :data:`BUILT`.
+        source: :data:`DOWNLOADED`, :data:`BUILT`, :data:`IMPORTED` or :data:`SOCIETY`.
         slug: What the model is called — the name a sidecar files its boxes under.
         title: A human title where one is recorded, else ``""``.
         version: The bundle's version, or the siar-build that produced the model.
@@ -180,6 +190,17 @@ class Model:
     def imported(self) -> bool:
         """Whether this model was carried here from another machine."""
         return self.source == IMPORTED
+
+    @property
+    def society(self) -> bool:
+        """Whether this is a society of bots voting rather than one program.
+
+        Worth asking separately from :attr:`built`, because it changes what the slug *means*: a
+        built model is one search's answer and will say the same thing next month, and a society
+        republishes as its leaderboard moves. Two scans of one folder a week apart under one
+        society name are not necessarily two runs of the same detector.
+        """
+        return self.source == SOCIETY
 
     @property
     def local(self) -> bool:
@@ -324,7 +345,7 @@ def _connect(path: str) -> sqlite3.Connection | None:
     return conn
 
 
-def _get(row: sqlite3.Row, key: str, default=None):
+def _get(row, key: str, default=None):
     """One column, or ``default`` when this schema has not got it.
 
     The index belongs to a program that versions separately from this one. A column added or
@@ -464,6 +485,148 @@ def built_models(db_path: str | None = None, *, limit: int = BUILD_LIMIT) -> lis
         conn.close()
 
 
+#: Columns copied from a society row into :attr:`Model.detail`.
+_SOCIETY_DETAIL = (
+    "id", "name", "target", "positive_tags", "created_at", "input_dir", "output_dir",
+    "package_dir", "sample_rate", "n_fft", "hop", "n_bins", "fmin_hz", "fmax_hz",
+    "arena_recordings", "unseen_recordings", "top_n", "k", "n_members", "n_bots", "rounds",
+    "evaluations", "best_arena_auc", "member_mean_auc", "unseen_auc", "stability", "parity_ok",
+    "state", "seed", "last_round_at", "stopped_at", "notes",
+)
+
+
+def _members(conn: sqlite3.Connection, soc_id: int, limit: int = 50) -> list[Program]:
+    """A society's leaderboard, best first, as programs.
+
+    The same shape a build's bots are given, because the screen asks the same question of both —
+    *what is inside this* — and the answer should not need two panels. What differs is the
+    ordering: a build's programs are ranked by the search that found them, and a society's by how
+    they scored on audio no search ever trained on.
+    """
+    # Two ``SELECT *`` queries merged here rather than one join naming columns. A join has to
+    # name what it selects, and every name is a bet that this schema has that column — the exact
+    # bet the rest of this module refuses to make, since the file belongs to a program that
+    # versions separately. ``_get`` covers a column that is not there; a join cannot.
+    try:
+        ranked = conn.execute(
+            "SELECT * FROM soc_ranks WHERE soc_id = ? ORDER BY rank LIMIT ?",
+            (int(soc_id), int(limit)),
+        ).fetchall()
+    except sqlite3.Error:
+        # A table this schema has not got is "no members", exactly as a missing column is a blank
+        # field: a listing, never an error.
+        return []
+    if not ranked:
+        return []
+
+    wanted = [int(_get(row, "program_id", 0) or 0) for row in ranked]
+    try:
+        placeholders = ",".join("?" * len(wanted))
+        found = {
+            int(_get(row, "id", 0) or 0): row
+            for row in conn.execute(
+                f"SELECT * FROM programs WHERE id IN ({placeholders})", wanted)
+        }
+    except sqlite3.Error:
+        found = {}
+
+    out = []
+    for row in ranked:
+        program = found.get(int(_get(row, "program_id", 0) or 0))
+        out.append(Program(
+            # The society's rank, not the search's: these are ordered by how they scored on audio
+            # no search of this society ever trained on.
+            rank=_get(row, "rank", 0),
+            name=_get(program, "name", "") if program is not None else "",
+            kind=_get(program, "kind", "") if program is not None else "",
+            # Fitness on this row means the arena score, which is the number the society ranked
+            # by. The search's own fitness is about a different split and is not comparable.
+            fitness=_get(row, "arena_auc"),
+            threshold=_get(row, "threshold"),
+            polarity=_get(program, "polarity", 1) if program is not None else 1,
+            n_nodes=_get(program, "n_nodes", 0) if program is not None else 0,
+            depth=_get(program, "depth", 0) if program is not None else 0,
+            features=_features(_get(program, "features_used", "[]") if program is not None
+                               else "[]"),
+            infix=_get(program, "infix", "") if program is not None else "",
+            saved_path=_get(program, "saved_path", "") if program is not None else "",
+        ))
+    return out
+
+
+def society_models(db_path: str | None = None, *, limit: int = BUILD_LIMIT) -> list[Model]:
+    """The societies ``siar-build`` is breeding on this machine, newest round first.
+
+    A society publishes one runnable package like any other model, so from here it is a folder to
+    hand :func:`siarapp.loader.load_local` and nothing more. What the listing has to carry, and a
+    build's row does not, is that it **moves**: the members are whichever bots were best when it
+    last published, and a society still running will publish different ones.
+
+    A society that has not published yet, or whose package has been deleted, is listed and says so
+    — the same discipline :func:`built_models` follows, and for the same reason: a row somebody
+    will come looking for is worth more than a listing of successes.
+
+    Args:
+        db_path: The index to read. Defaults to :func:`build_db_path`.
+        limit: Most recent societies to read.
+
+    Returns:
+        One :class:`Model` per society, each carrying the top of its leaderboard as programs.
+        Empty when siar-build has never run here, when its index cannot be read, or when it is a
+        schema without societies in it.
+    """
+    conn = _connect(db_path or build_db_path())
+    if conn is None:
+        return []
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM socs ORDER BY COALESCE(last_round_at, created_at) DESC, id DESC"
+                " LIMIT ?", (int(limit),)
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+
+        models = []
+        for row in rows:
+            package = str(_get(row, "package_dir", "") or "")
+            runnable = bool(package) and os.path.isdir(package)
+            parity = _get(row, "parity_ok")
+            members = int(_get(row, "n_members", 0) or 0)
+            k = int(_get(row, "k", 0) or 0)
+            if not package:
+                note = "no model published yet — it has not finished a round"
+            elif not runnable:
+                note = f"published at {package}, which is no longer there"
+            elif parity is not None and not parity:
+                # The same refusal siar-build makes. Boxes from a model that does not compute what
+                # was measured look exactly like boxes from one that does.
+                note = "last parity gate FAILED — this model must not be scanned with"
+                runnable = False
+            else:
+                note = ""
+            models.append(Model(
+                source=SOCIETY,
+                slug=str(_get(row, "name", "") or _get(row, "target", "") or "society"),
+                title=str(_get(row, "target", "") or ""),
+                version=str(_get(row, "siarbuild_version", "") or ""),
+                platform="source",
+                path=package,
+                size_bytes=_dir_bytes(package) if runnable else 0,
+                stamped_at=_epoch(_get(row, "last_round_at", "")
+                                  or _get(row, "created_at", "")),
+                runnable=runnable,
+                note=note,
+                detail={name: _get(row, name) for name in _SOCIETY_DETAIL} | {
+                    "votes": f"{k} of {members}" if members else "",
+                },
+                programs=_members(conn, int(_get(row, "id", 0) or 0)),
+            ))
+        return models
+    finally:
+        conn.close()
+
+
 def imported_models() -> list[Model]:
     """The models carried onto this machine from another one, newest import first.
 
@@ -525,13 +688,16 @@ def local_model(slug: str, *, db_path: str | None = None) -> Model | None:
         db_path: siar-build's index, for a test.
 
     Returns:
-        The most recent runnable match, imported models before local builds when both have the
-        name — an import is the deliberate act of the two.
+        The most recent runnable match. Imported models come first — an import is the deliberate
+        act of the three — then societies, then single builds. A society and a build cannot in
+        practice collide, since siar-build names them differently, but the order is fixed rather
+        than incidental so that a name which somehow resolved two ways would resolve the same way
+        every time.
     """
     wanted = str(slug or "").strip().lower()
     if not wanted:
         return None
-    candidates = [m for m in imported_models() + built_models(db_path)
+    candidates = [m for m in imported_models() + society_models(db_path) + built_models(db_path)
                   if m.runnable and m.slug.lower() == wanted]
     return candidates[0] if candidates else None
 
@@ -540,9 +706,12 @@ def library(*, db_path: str | None = None) -> list[Model]:
     """Everything runnable on this machine: downloaded, built here, then carried here.
 
     Grouped rather than interleaved by date. They are different kinds of thing — one can be
-    fetched again from the server, one exists nowhere but this disk, and one exists here because
-    somebody moved it — and a list that sorted them together would make that difference invisible
-    at exactly the moment somebody is choosing between them.
+    fetched again from the server, one is a population still being bred, one is a single search's
+    answer, and one is here because somebody carried it — and a list that sorted them together
+    would make that difference invisible at exactly the moment somebody is choosing between them.
+
+    Societies come before builds because a society *is* the best of many builds, so a machine
+    running one has its answer at the top rather than under forty rounds of its own workings.
 
     Args:
         db_path: siar-build's index, for a test or a non-standard workspace.
@@ -550,7 +719,8 @@ def library(*, db_path: str | None = None) -> list[Model]:
     Returns:
         The models, downloaded first, each group newest first.
     """
-    return downloaded_models() + built_models(db_path) + imported_models()
+    return (downloaded_models() + society_models(db_path) + built_models(db_path)
+            + imported_models())
 
 
 #: What a model whose target nothing on this machine knows is filed under. A word rather than a

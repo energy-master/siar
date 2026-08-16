@@ -66,6 +66,21 @@ def _built(slug="recall", runnable=True, programs=None):
                      _program(), _program(rank=1, kind="runner_up", threshold=None)])
 
 
+def _society(slug="socmodel_recall_a7f3k2", runnable=True, members=None):
+    """A society: many bots for one target, voting, and still being bred."""
+    return Model(source="society", slug=slug, title="recall", version="0.1.0", platform="source",
+                 path="/models/socs/" + slug + "/siar_" + slug, size_bytes=160_000,
+                 stamped_at=1_700_000_200, runnable=runnable,
+                 note="" if runnable else "no model published yet — it has not finished a round",
+                 detail={"target": "recall", "input_dir": "/audio", "sample_rate": 96000,
+                         "n_fft": 8192, "hop": 2048, "n_bins": 128, "fmin_hz": 5000.0,
+                         "fmax_hz": 7800.0, "unseen_auc": 0.883, "stability": 0.85,
+                         "parity_ok": 1, "state": "running", "rounds": 37, "n_bots": 312,
+                         "n_members": 20, "k": 13, "votes": "13 of 20"},
+                 programs=members if members is not None else [
+                     _program(), _program(rank=1, kind="runner_up", threshold=-0.2)])
+
+
 def _library(models=None, runs=None):
     lib = tui.Library(models=models if models is not None else [_downloaded(), _built()],
                       runs=runs or [], form=tui.Form(input="/audio", out="/out"))
@@ -690,3 +705,84 @@ def test_typing_a_name_does_not_trigger_the_screens_own_keys(workspace):
     for char in "quiet":
         assert tui._handle_key(lib, char) == "", "no key typed into a name may act"
     assert lib.buffer == "quiet"
+
+
+# ---- societies ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("width,height", SIZES)
+def test_a_library_with_a_society_still_fits(width, height):
+    frame = tui.render(_society_library(), width, height)
+    assert len(frame) <= height
+    assert all(visible_len(line) == width for line in frame)
+
+
+def _society_library(runs=None):
+    lib = tui.Library(models=[_society(), _built()], runs=runs or [],
+                      form=tui.Form(input="/audio", out="/out"))
+    return lib
+
+
+def test_a_society_is_typed_as_one(colour):
+    """The TYPE column is where a reader finds out that this slug does not name a fixed program:
+    a society republishes as its leaderboard moves."""
+    frame = "\n".join(tui.render(_society_library(), 160, 44))
+    assert "TYPE" in frame
+    assert "society" in frame
+    assert "built here" in frame
+
+
+def test_the_header_counts_the_societies(colour):
+    frame = "\n".join(tui.render(_society_library(), 160, 44))
+    assert "1 society" in frame
+
+
+def test_selecting_a_society_describes_what_it_votes_with(colour):
+    lib = _society_library()
+    lib.cursor = next(i for i, m in enumerate(lib.models) if m.society)
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "SOCIETY — socmodel_recall_a7f3k2" in frame
+    assert "13 of 20 members must agree" in frame
+    assert "312 bots bred over 37 round(s)" in frame
+    assert "stability" in frame
+    assert "0.883" in frame
+
+
+def test_a_societys_bots_are_called_its_members(colour):
+    """They are not "behind" it the way a build's programs are behind a champion — they are what
+    it votes with, ranked on audio no search of its ever trained on."""
+    lib = _society_library()
+    lib.cursor = next(i for i, m in enumerate(lib.models) if m.society)
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "MEMBERS" in frame
+    assert "never trained on" in frame
+
+
+def test_a_society_with_no_members_yet_says_why(colour):
+    lib = tui.Library(models=[_society(runnable=False, members=[])], runs=[],
+                      form=tui.Form(input="/audio", out="/out"))
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "not finished a round" in frame
+
+
+def test_a_society_can_be_run_from_the_model_view():
+    """The run pane already exists; a society reaches it by being a local package like any other
+    model. ``Model.local`` is the whole of what decides that, in this screen and in the CLI.
+
+    Asserted as "nothing about it *being a society* is what stops it" rather than as "it runs",
+    because the form still refuses for the ordinary reasons — here, a fixture input folder that
+    does not exist. A published society must be refused for exactly the same reasons a built model
+    is, and no others.
+    """
+    lib = _society_library()
+    society = next(m for m in lib.models if m.society)
+    built = next(m for m in lib.models if m.built)
+    assert society.local and society.runnable
+    assert lib.form.blocking(society) == lib.form.blocking(built)
+
+
+def test_a_society_that_cannot_run_is_refused_with_its_reason():
+    lib = tui.Library(models=[_society(runnable=False)], runs=[],
+                      form=tui.Form(input="/audio", out="/out"))
+    lib.cursor = 0
+    assert lib.form.blocking(lib.model()) != ""

@@ -231,3 +231,139 @@ def test_the_library_lists_downloaded_models_before_built_ones(tmp_path, package
         (library.DOWNLOADED, "all_structures"),
         (library.BUILT, "recall"),
     ]
+
+
+# ---- societies ------------------------------------------------------------------------------
+
+
+def _society(path, *, package_dir="", parity_ok=1, members=2, name="socmodel_recall_a7f3k2"):
+    """Add a society and its leaderboard to an index :func:`_index` has already written.
+
+    Two tables siar-build added after this file was first written, which is the point of the
+    defensive reads: an index without them must be a listing with no societies in it, never an
+    error.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS socs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, name TEXT, created_at TEXT,
+            siarbuild_version TEXT, target TEXT, input_dir TEXT, output_dir TEXT,
+            positive_tags TEXT, sample_rate INTEGER, n_fft INTEGER, hop INTEGER, n_bins INTEGER,
+            fmin_hz REAL, fmax_hz REAL, arena_recordings INTEGER, unseen_recordings INTEGER,
+            top_n INTEGER, k INTEGER, n_members INTEGER, n_bots INTEGER, rounds INTEGER,
+            evaluations INTEGER, best_arena_auc REAL, unseen_auc REAL, stability REAL,
+            parity_ok INTEGER, package_dir TEXT, state TEXT, last_round_at TEXT, notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS soc_ranks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, soc_id INTEGER, program_id INTEGER,
+            rank INTEGER, arena_auc REAL, arena_ap REAL, arena_f1 REAL, train_f1 REAL,
+            threshold REAL, in_model INTEGER, seeded_rounds INTEGER, rank_history TEXT,
+            evaluated_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO socs (uid, name, created_at, siarbuild_version, target, input_dir,"
+        " output_dir, sample_rate, n_fft, hop, n_bins, fmin_hz, fmax_hz, arena_recordings,"
+        " unseen_recordings, top_n, k, n_members, n_bots, rounds, evaluations, best_arena_auc,"
+        " unseen_auc, stability, parity_ok, package_dir, state, last_round_at) VALUES"
+        " ('u1', ?, '2026-08-16T09:00:00+00:00', '0.1.0', 'recall', '/audio', '/models',"
+        " 96000, 8192, 2048, 128, 5000.0, 7800.0, 2, 2, 20, 13, ?, 312, 37, 666000, 0.951,"
+        " 0.883, 0.85, ?, ?, 'running', '2026-08-16T11:00:00+00:00')",
+        (name, members, parity_ok, package_dir or None),
+    )
+    for rank in range(members):
+        conn.execute(
+            "INSERT INTO soc_ranks (soc_id, program_id, rank, arena_auc, arena_f1, threshold,"
+            " in_model, seeded_rounds) VALUES (1, ?, ?, ?, 0.84, -0.12, 1, ?)",
+            (rank + 1, rank, 0.95 - rank * 0.01, 9 - rank),
+        )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_an_index_without_societies_lists_none_rather_than_failing(tmp_path):
+    """siar-build versions separately from this package. A table it has not got yet must cost a
+    listing with nothing in it, exactly as a missing column costs a blank field."""
+    path = _index(tmp_path / "models.db")
+    assert library.society_models(path) == []
+    assert library.library(db_path=path)          # the builds are still there
+
+
+def test_a_society_is_listed_with_its_members(tmp_path, package):
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir=str(package))
+
+    societies = library.society_models(path)
+    assert len(societies) == 1
+    soc = societies[0]
+    assert soc.slug == "socmodel_recall_a7f3k2"
+    assert soc.source == library.SOCIETY
+    assert soc.society and soc.local and not soc.built
+    assert soc.runnable and soc.note == ""
+    assert soc.shapes == ("recall",)
+    assert len(soc.programs) == 2
+    assert soc.detail["votes"] == "13 of 2"
+    assert soc.detail["stability"] == 0.85
+
+
+def test_a_society_is_a_local_package_so_the_loader_takes_the_same_path(tmp_path, package):
+    """``Model.local`` is what decides between ``load_local`` and a cached bundle, in the CLI and
+    on the library screen alike. A society is a plain package on this disk like any built model."""
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir=str(package))
+    assert library.society_models(path)[0].local
+
+
+def test_a_society_that_has_not_published_says_so(tmp_path):
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir="")
+    soc = library.society_models(path)[0]
+    assert not soc.runnable
+    assert "not finished a round" in soc.note
+
+
+def test_a_society_that_failed_its_parity_gate_will_not_run(tmp_path, package):
+    """The same refusal siar-build makes. Boxes from a model that does not compute what was
+    measured look exactly like boxes from one that does, which makes them worse than none."""
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir=str(package), parity_ok=0)
+    soc = library.society_models(path)[0]
+    assert not soc.runnable
+    assert "parity" in soc.note.lower()
+
+
+def test_a_society_whose_package_is_gone_says_where_it_was(tmp_path):
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir="/nowhere/siar_soc")
+    soc = library.society_models(path)[0]
+    assert not soc.runnable and "no longer there" in soc.note
+
+
+def test_a_society_is_resolvable_by_name_for_siar_app_run(tmp_path, package):
+    """What ``siar-app run -a <name>`` consults before it asks the server. Without this a society
+    falls through to the registry, which has never heard of it."""
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir=str(package))
+    found = library.local_model("socmodel_recall_a7f3k2", db_path=path)
+    assert found is not None and found.society
+    assert library.local_model("SOCMODEL_RECALL_A7F3K2", db_path=path) is not None
+
+
+def test_a_society_that_cannot_run_is_not_resolved_by_name(tmp_path, package):
+    path = _index(tmp_path / "models.db")
+    _society(path, package_dir=str(package), parity_ok=0)
+    assert library.local_model("socmodel_recall_a7f3k2", db_path=path) is None
+
+
+def test_societies_lead_the_library(tmp_path, package):
+    """A society is the best of many builds, so a machine running one has its answer at the top
+    rather than under forty rounds of its own workings."""
+    path = _index(tmp_path / "models.db", package_dir=str(package))
+    _society(path, package_dir=str(package))
+    models = library.library(db_path=path)
+    kinds = [m.source for m in models]
+    assert library.SOCIETY in kinds and library.BUILT in kinds
+    assert kinds.index(library.SOCIETY) < kinds.index(library.BUILT)

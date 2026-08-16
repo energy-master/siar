@@ -945,7 +945,7 @@ class Library:
 #: chosen when it was built, changeable with ``n``, and unique because siar-build tags it — and it
 #: *detects* something, which is the label its boxes carry and is not anybody's to choose after
 #: the corpus was labelled.
-_MODEL_HEADERS = ("NAME", "FROM RUN", "LOOKS FOR", "WHERE FROM", "VERSION", "RUNS ON", "SIZE",
+_MODEL_HEADERS = ("NAME", "FROM RUN", "LOOKS FOR", "TYPE", "VERSION", "RUNS ON", "SIZE",
                   "WHEN", "BOTS", "RUNS HERE")
 _MODEL_ALIGN = ("<", "<", "<", "<", "<", "<", ">", "<", ">", "<")
 #: BOT is first because it is the name somebody types; the rank is kept beside it because it is
@@ -965,11 +965,21 @@ def _number(value, spec: str = ".3f", missing: str = "—") -> str:
 
 
 def _where_from(model: Model) -> str:
-    """The "where from" cell: the three ways a model gets onto a machine, told apart.
+    """The TYPE cell: what kind of thing this is, which is also how it got here.
 
-    An imported model names the machine it was built on rather than saying "imported", because
-    on a vessel with four of them that is the only part anybody needs.
+    Four kinds, and the distinction is not cosmetic. A **downloaded** bundle can be fetched again;
+    an **imported** one exists nowhere but this disk and the machine it was carried from, so it
+    names that machine rather than saying "imported", which on a vessel with four of them is the
+    only part anybody needs. A **built** model is one search's answer and will say the same thing
+    next month.
+
+    A **society** is the one that behaves differently: it is many bots voting, and siar-build
+    republishes it as its leaderboard moves. Two scans of one folder a week apart under one
+    society name are not necessarily two runs of the same detector, and the column is where a
+    reader finds that out.
     """
+    if model.society:
+        return "society"
     if model.imported:
         origin = str(model.detail.get("imported_from") or "")
         return f"from {origin}" if origin else "imported"
@@ -1048,13 +1058,17 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
     A built model can be described completely — the corpus, the band, the gates, the features —
     because it was built here. A downloaded one is described by its manifest and no further: what
     is inside the bundle is the closed side, and inventing detail about it would be worse than
-    the blank.
+    the blank. A society is described by the two things that are true of it and of nothing else
+    on the list: how many bots agree before it draws a box, and how much of it is still moving.
     """
     if model is None:
         return []
-    lines = [_heading(f"MODEL — {model.slug}", width)]
+    lines = [_heading(f"{'SOCIETY' if model.society else 'MODEL'} — {model.slug}", width)]
     if not model.runnable:
         lines.append(paint(f"  cannot run here: {model.note}", YELLOW))
+
+    if model.society:
+        return lines + _society_detail(model, width)
 
     if not model.local:
         family = model.detail.get("family") or "structure_scanners"
@@ -1101,6 +1115,52 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
         lines.append(paint(f"  stopped at {detail['stopped_at']} — {detail.get('reason') or ''}",
                            YELLOW))
     return lines
+
+
+def _society_detail(model: Model, width: int) -> list[str]:
+    """A society, in the terms that make it different from a single model.
+
+    Three facts a build row has no place for. **The vote** — how many of its members must agree
+    before a box is drawn — is what the model actually does. **Stability** is how much of it
+    survived the last round: at 1.00 it has stopped finding anything better, and low it is
+    publishing a materially different detector each time. And the **held-out** number is measured
+    on recordings used neither to breed its bots nor to choose between them, which is the only
+    reason it means anything.
+    """
+    detail = model.detail
+    band = "auto"
+    if detail.get("fmax_hz") is not None:
+        band = f"{float(detail.get('fmin_hz') or 0):.0f}-{float(detail['fmax_hz']):.0f} Hz"
+    audio = ("geometry not recorded" if detail.get("sample_rate") is None else
+             f"{detail['sample_rate']} Hz · fft {detail.get('n_fft')} · hop {detail.get('hop')} · "
+             f"band {band} · {detail.get('n_bins')} bins")
+
+    state = str(detail.get("state") or "")
+    living = " · " + paint("still breeding", GREEN) if state == "running" else ""
+    parity = ""
+    if detail.get("parity_ok") is not None:
+        parity = " · parity " + ("ok" if detail["parity_ok"] else paint("FAILED", RED))
+
+    stability = detail.get("stability")
+    reading = ""
+    if stability is not None:
+        reading = ("   converged — it has stopped finding better" if float(stability) >= 0.95
+                   else "   still turning over" if float(stability) < 0.6 else "")
+
+    return [
+        f"  target {detail.get('target') or model.slug}"
+        + paint(f"   {state or 'stopped'}{living}", DIM),
+        f"  votes  {detail.get('votes') or '—'} members must agree"
+        + paint(f"   of {detail.get('n_bots') or 0} bots bred over "
+                f"{detail.get('rounds') or 0} round(s)", DIM),
+        f"  result held-out {_number(detail.get('unseen_auc'))}"
+        + paint(f" — on recordings used neither to breed its bots nor to choose between them",
+                DIM) + parity,
+        f"  moving stability {_number(stability, '.2f')}" + paint(reading, DIM),
+        paint(f"  corpus {detail.get('input_dir') or '—'}", DIM),
+        f"  audio  {audio}",
+        paint(f"  package {model.path or 'not published yet'}", DIM),
+    ]
 
 
 def _bot_detail(program, width: int) -> list[str]:
@@ -1218,10 +1278,14 @@ def _title(lib: Library, width: int) -> str:
     downloaded = sum(1 for m in lib.all_models if not m.local)
     built = sum(1 for m in lib.all_models if m.built)
     imported = sum(1 for m in lib.all_models if m.imported)
+    societies = sum(1 for m in lib.all_models if m.society)
     bots = sum(len(m.programs) for m in lib.all_models)
     features = len(feature_usage(lib.all_models))
     counts = (f"{len(lib.targets)} target{'' if len(lib.targets) == 1 else 's'} · "
-              f"{downloaded} downloaded · {built} built here · "
+              # Societies first when there are any: a society is the best of many builds, so a
+              # machine running one has its answer before its workings.
+              + (f"{societies} societ{'y' if societies == 1 else 'ies'} · " if societies else "")
+              + f"{downloaded} downloaded · {built} built here · "
               # Named only when there are any: on the machine models are built on, which is most
               # of them, a permanent "0 imported" would be a column about nothing.
               + (f"{imported} imported · " if imported else "")
@@ -1315,15 +1379,23 @@ def _top(lib: Library, width: int, room: int) -> list[str]:
                          lib.cursor, model_rows, lib.focus == "models")
     lines.append(_rule(width))
 
-    lines.append(_panel("BOTS", "the programs behind that model — only a calibrated one can run",
-                        focused=lib.focus == "bots"))
+    model = lib.model()
+    # A society's bots are not "behind" it in the same sense: they are its members, ranked on
+    # audio no search of its ever trained on, and the top of them are what it votes with.
+    lines.append(_panel(
+        "MEMBERS" if model is not None and model.society else "BOTS",
+        "ranked on audio the searches never trained on — the best of them vote"
+        if model is not None and model.society
+        else "the programs behind that model — only a calibrated one can run",
+        focused=lib.focus == "bots"))
     if programs:
         lines += _list_lines(_BOT_HEADERS, _bot_rows(programs), _BOT_ALIGN,
                              lib.program_cursor, bot_rows, lib.focus == "bots")
     else:
-        model = lib.model()
         lines.append(paint(
-            "   no bots to show — a downloaded bundle keeps its programs inside it"
+            "   no members yet — it has not finished a round"
+            if model is not None and model.society
+            else "   no bots to show — a downloaded bundle keeps its programs inside it"
             if model is not None and not model.built
             else "   this build recorded no programs", DIM))
 
