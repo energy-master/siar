@@ -19,6 +19,7 @@ Subcommands:
 * ``siar-app whoami``     — who the cached token belongs to.
 * ``siar-app algorithms`` — the scanning algorithms your account can download.
 * ``siar-app installed``  — the algorithm bundles on this machine, and their versions.
+* ``siar-app published``  — the models other accounts published here that you may run.
 * ``siar-app feedback``   — rate how well an algorithm performed, 0-9.
 * ``siar-app scan``       — summarise a folder from headers alone.
 * ``siar-app run``        — scan a folder and build an output folder for the app.
@@ -230,6 +231,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_installed.add_argument("--json", action="store_true", help="print the raw list as JSON")
     add_server(p_installed)
 
+    p_published = sub.add_parser(
+        "published",
+        help="list the models other people published to this install that you can run",
+        description="Models somebody bred with siar-build on their own machine and published to "
+        "this install. Not the same catalogue as `siar-app algorithms`: that one is the "
+        "install's and everybody who can sign in sees all of it, while a published model is "
+        "granted per account — you always see your own uploads, a super sees every one, and "
+        "anybody else sees what has been released and granted to them. `run -a <name>` fetches "
+        "one on demand; --get pulls it now, which is what to do before going somewhere with no "
+        "link.",
+    )
+    p_published.add_argument("--get", metavar="NAME",
+                             help="download one now instead of listing them")
+    p_published.add_argument("--owner", metavar="USER",
+                             help="whose upload, when two accounts published the same name")
+    p_published.add_argument("--refresh", action="store_true",
+                             help="fetch again even if it is already here — a society "
+                                  "republishes as its leaderboard moves")
+    p_published.add_argument("--remove", metavar="NAME",
+                             help="delete one from this machine (it can be fetched again)")
+    p_published.add_argument("--json", action="store_true", help="print the raw list as JSON")
+    add_server(p_published)
+
     p_feedback = sub.add_parser(
         "feedback",
         help="rate how well an algorithm performed, 0-9",
@@ -397,6 +421,7 @@ _DISPATCH = {
     "whoami": commands.cmd_whoami,
     "algorithms": commands.cmd_algorithms,
     "installed": commands.cmd_installed,
+    "published": commands.cmd_published,
     "export": commands.cmd_export,
     "import": commands.cmd_import,
     "feedback": commands.cmd_feedback,

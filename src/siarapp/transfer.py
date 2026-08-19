@@ -124,9 +124,9 @@ def export_model(model: Any, dest: str = "") -> str:
         The path written.
 
     Raises:
-        TransferError: If the model has no package on this disk — a downloaded bundle, or a build
-            that was never packaged. Both are refusals with a way forward rather than an empty
-            archive.
+        TransferError: If the model is not this machine's to pass on — a downloaded bundle or one
+            published to the installation by another account — or if it has no package on this
+            disk. All three are refusals with a way forward rather than an empty archive.
     """
     source = str(getattr(model, "source", "") or "")
     if source == "downloaded":
@@ -134,6 +134,17 @@ def export_model(model: Any, dest: str = "") -> str:
             f"{model.slug} is a downloaded bundle, not a model built here — it is licensed per "
             f"machine and platform. Run `siar-app login` there and `siar-app run -a "
             f"{model.slug}`, which fetches the build for that machine."
+        )
+    if source == "published":
+        # The files would copy perfectly well; that is exactly why this is refused here. Who may
+        # run a published model is a grant on the installation, and a bundle written from this
+        # cache would hand it to somebody the account that bred it never gave it to.
+        owner = str(dict(getattr(model, "detail", {}) or {}).get("owner") or "another account")
+        raise TransferError(
+            f"{model.slug} was published to the installation by {owner} and is here on a grant, "
+            f"so it is not this machine's to pass on. On the other machine: `siar-app login` and "
+            f"`siar-app run -a {model.slug}`, which fetches it if that account has been granted "
+            f"it too."
         )
     # Checked before it is made absolute: ``abspath("")`` is the working directory, and a build
     # that was never packaged would otherwise export whatever the reader happened to be standing

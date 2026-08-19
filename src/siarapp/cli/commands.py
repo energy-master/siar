@@ -76,7 +76,13 @@ from siarapp.grid import ScannerError
 from siarapp.io.audio import find_recordings, probe
 from siarapp.io.output import RUN_MANIFEST_NAME
 from siarapp.io.performance import PHASES, progress_block, realtime_factor
-from siarapp.loader import installed_algorithms, load_local, load_remote
+from siarapp.loader import (
+    installed_algorithms,
+    load_cached,
+    load_local,
+    load_remote,
+    load_unpacked,
+)
 from siarapp.runner import RunOptions, run_folder
 
 __all__ = [
@@ -89,6 +95,7 @@ __all__ = [
     "cmd_license",
     "cmd_login",
     "cmd_logout",
+    "cmd_published",
     "cmd_quickstart",
     "cmd_readme",
     "cmd_run",
@@ -634,6 +641,185 @@ def _version_key(text: str) -> tuple:
     return tuple(int(p) for p in parts[:4]) or (0,)
 
 
+# -- models other accounts published ------------------------------------------------------------
+
+
+def cmd_published(args: Namespace) -> int:
+    """List, fetch or forget the models other accounts published to the installation.
+
+    A different catalogue from ``algorithms`` and deliberately a different command. That one is
+    the installation's: obfuscated bundles, published once, offered to everybody who can sign in.
+    These are packages somebody bred on their own box with ``siar-build`` and uploaded here, and
+    who may run one is a per-account grant — so this list is *this account's*, two people signed
+    in to one install see different rows, and a model that is missing is a grant nobody has made
+    rather than a fault to work around.
+    """
+    from siarapp.published import fetch_published, installed_published
+
+    if args.remove:
+        return _forget_published(args.remove, args.owner or "")
+
+    cached = {(r["owner"].lower(), r["slug"].lower()): r for r in installed_published()}
+
+    if args.get:
+        try:
+            client = client_from_credentials(args.server)
+            row = fetch_published(
+                client, args.get, args.owner or "", refresh=args.refresh,
+                on_progress=None if args.json else _download_reporter(args.get),
+            )
+        except (AuthError, ApiError, ScannerError) as e:
+            return _err(str(e))
+        if args.json:
+            print(json.dumps(row, indent=2, sort_keys=True))
+            return 0
+        return _report_fetched(row)
+
+    rows, offline = _published_catalogue(args)
+    if args.json:
+        for row in rows:
+            key = (str(row.get("owner") or "").lower(), str(row.get("slug") or "").lower())
+            row["cached"] = key in cached
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        if offline:
+            print("No published models have been fetched onto this machine.")
+        else:
+            print("No models have been published to your account on this install.")
+            print("A society is bred with siar-build and uploaded with `siar-build soc publish`; "
+                  "a super then releases it and grants it per account.")
+        return 0
+
+    table = []
+    for row in rows:
+        key = (str(row.get("owner") or "").lower(), str(row.get("slug") or "").lower())
+        here = cached.get(key)
+        vote = row.get("vote") if isinstance(row.get("vote"), dict) else {}
+        table.append([
+            str(row.get("slug") or "") + ("" if row.get("published", True) else " *"),
+            str(row.get("target") or "—"),
+            str(row.get("owner") or "—"),
+            _access_word(str(row.get("access") or "")),
+            f"{vote.get('k') or 0} of {vote.get('n') or 0}" if vote.get("n") else "—",
+            _held_out(row.get("unseen")),
+            human_bytes(int(row.get("bytes") or 0)),
+            _cached_state(here, str(row.get("version") or "")),
+        ])
+    print(render_table(
+        ["NAME", "FINDS", "PUBLISHED BY", "WHY YOU", "VOTE", "HELD-OUT", "SIZE", "HERE"],
+        table,
+        align=["<", "<", "<", "<", ">", ">", ">", "<"],
+    ))
+
+    print()
+    unreleased = [r for r in rows if not r.get("published", True)]
+    if unreleased:
+        one = len(unreleased) == 1
+        print(f"* {len(unreleased)} of these {'is' if one else 'are'} not released — visible to "
+              f"you because you published {'it' if one else 'them'}, or because you are a super. "
+              f"Nobody else can be granted one until it is ticked in Admin -> Society models.")
+    print("  siar-app published --get <name>            fetch one now, to run offline later")
+    print("  siar-app run <folder> -a <name> --out DIR  fetches it if it is not here yet")
+    return 0
+
+
+def _published_catalogue(args: Namespace) -> tuple[list[dict], bool]:
+    """The catalogue from the install, or what is cached here when it cannot be reached.
+
+    A listing that fails because a vessel has no link is a listing that fails when it is most
+    needed. The cached rows are the ones this machine can actually run offline anyway, so they
+    are the honest fallback — said as such, since "the four you have" and "the four you may have"
+    are different answers.
+
+    Returns:
+        ``(rows, offline)`` — the catalogue rows, and whether they came out of the cache.
+    """
+    from siarapp.published import installed_published
+
+    try:
+        return client_from_credentials(args.server).published_models(), False
+    except (AuthError, ApiError) as e:
+        # The message already says which of the three it is — no token, no network, or an install
+        # that refused — and repeating it in a wrapper of our own would only bury it.
+        print(f"warning: {e}", file=sys.stderr)
+        print("listing what has already been fetched onto this machine instead.", file=sys.stderr)
+        return [dict(r["catalogue"]) for r in installed_published()], True
+
+
+def _access_word(access: str) -> str:
+    """Why this account may run a published model, in a word.
+
+    Worth a column because the three do not behave the same. What you published yourself and —
+    for a super — everything on the install are entitlements: they need no release and cannot be
+    taken away by the screen that hands models to other people. A grant can be, and only ever
+    covers a released build.
+    """
+    return {"owner": "you published it", "super": "super", "granted": "granted"}.get(
+        access, access or "—")
+
+
+def _held_out(unseen: Any) -> str:
+    """What a published model scored on audio nothing selected on, or a dash.
+
+    The only figure that answers "is this any good" without having been used to make it, which is
+    why it is the one number in this listing.
+    """
+    if not isinstance(unseen, dict):
+        return "—"
+    try:
+        return f"{float(unseen['roc_auc']):.3f}"
+    except (KeyError, TypeError, ValueError):
+        return "—"
+
+
+def _cached_state(here: dict | None, published_version: str) -> str:
+    """Whether this machine has the model, and whether what it has is the current build.
+
+    A society republishes as its leaderboard moves, so "here" and "current" are genuinely
+    different questions: a cached copy goes on running exactly as it did, which is the right
+    behaviour, and this cell is where somebody finds out that the install has moved on.
+    """
+    if here is None:
+        return "no"
+    if not here.get("runnable"):
+        return "damaged"
+    cached_version = str(here.get("version") or "")
+    if published_version and cached_version and cached_version != published_version:
+        return "older build"
+    return "yes"
+
+
+def _report_fetched(row: dict) -> int:
+    """What a fetch got, and what to do with it."""
+    catalogue = dict(row.get("catalogue") or {})
+    vote = catalogue.get("vote") if isinstance(catalogue.get("vote"), dict) else {}
+    print(f"Fetched {row['slug']} — {human_bytes(row['bytes'])}, "
+          f"{len(row['programs'])} member(s), published by {row['owner'] or 'another account'}.")
+    if vote.get("n"):
+        print(f"  votes  {vote.get('k') or 0} of {vote['n']} members must agree before it draws "
+              f"a box")
+    if not catalogue.get("published", True):
+        print("  note   this build is not released — you can run it because you published it, "
+              "or because you are a super.")
+    print(f"  {row['path']}")
+    print(f"\nRun it:  siar-app run <audio folder> -a {row['slug']} --out <output folder>")
+    print("It is also in `siar-app lib`, with its members and what each of them reads.")
+    return 0
+
+
+def _forget_published(slug: str, owner: str) -> int:
+    """Delete one fetched model from the cache."""
+    from siarapp.published import remove_published
+
+    if remove_published(slug, owner):
+        print(f"Removed {slug} from this machine. "
+              f"`siar-app published --get {slug}` fetches it again while the grant stands.")
+        return 0
+    return _err(f"no published model called {slug!r} has been fetched onto this machine")
+
+
 def cmd_lib(args: Namespace) -> int:
     """Open the library: what this machine can run, and the form that runs it.
 
@@ -658,7 +844,7 @@ def cmd_export(args: Namespace) -> int:
     from siarapp.library import library
     from siarapp.transfer import TransferError, export_model
 
-    models = [m for m in library() if m.local]
+    models = [m for m in library() if m.portable]
     if not args.model:
         return _list_exportable(models)
 
@@ -1079,13 +1265,20 @@ def _reporter(args: Namespace, slug: str, source: str = "", out_root: str = ""):
 
 
 def _resolve_algorithm(args: Namespace):
-    """Load the algorithm named on the command line: a path, this disk, or the server.
+    """Load the algorithm named on the command line: a path, this disk, or the install.
 
-    A model built here with siar-build, or imported from another machine, is a package on this
-    disk with a name — and needing ``--algorithm-path`` to run something the library is already
-    listing by that name would be the CLI failing to know what it knows. So a local model is
-    looked up before the server is asked, and the run says which one it used, because a name that
-    resolves two ways must never resolve silently.
+    A model built here with siar-build, imported from another machine, or fetched from an
+    installation somebody published it to is a package on this disk with a name — and needing
+    ``--algorithm-path`` to run something the library is already listing by that name would be the
+    CLI failing to know what it knows. So this disk is searched before the network is touched, and
+    the run says which model it used and where it came from, because a name that resolves two ways
+    must never resolve silently.
+
+    Only then is the install asked, and asked in the order that costs least: an algorithm bundle
+    already in the cache needs no request at all, and a name that is nobody's bundle is looked for
+    among the models published to this account before the download is attempted. An install too
+    old to have that catalogue answers 404, which is not an error here — it is an install with no
+    published models on it, and the bundle path carries on.
     """
     if args.algorithm_path:
         return load_local(os.path.expanduser(args.algorithm_path), args.algorithm or "")
@@ -1094,19 +1287,95 @@ def _resolve_algorithm(args: Namespace):
 
     from siarapp.library import local_model
 
+    quiet = bool(getattr(args, "quiet", False))
+    refresh = bool(getattr(args, "refresh", False))
     model = local_model(args.algorithm)
+    # ``--refresh`` is about fetching again, so it only overrides a model that CAN be fetched
+    # again. A model built here or carried here has no newer copy anywhere to go and get, and
+    # refusing to run one because the flag was on would be the flag deciding something it is not
+    # about.
+    if model is not None and refresh and model.published:
+        model = None
     if model is not None:
-        if not getattr(args, "quiet", False):
-            made = "imported from " + str(model.detail.get("imported_from") or "another machine") \
-                if model.imported else "built here"
-            print(f"using {model.slug} ({made}) — {model.path}")
-        return load_local(model.path, model.slug)
+        if not quiet:
+            print(f"using {model.slug} ({_provenance(model)}) — {model.path}")
+        return _load_disk(model.path, model.slug, published=model.published)
+
+    if not refresh:
+        cached = load_cached(args.algorithm, args.platform)
+        if cached is not None:
+            return cached
 
     client = client_from_credentials(args.server)
+    published = _published_match(client, args.algorithm)
+    if published is not None:
+        from siarapp.published import install_published
+
+        data = client.published_bundle(
+            str(published.get("slug") or args.algorithm),
+            model_id=int(published.get("id") or 0),
+            owner=str(published.get("owner") or ""),
+            on_progress=None if quiet else _download_reporter(args.algorithm),
+        )
+        row = install_published(published, data, base_url=client.base_url)
+        if not quiet:
+            print(f"using {row['slug']} (published by {row['owner'] or 'another account'}) — "
+                  f"{row['path']}")
+        return _load_disk(row["path"], row["slug"], published=True)
+
     return load_remote(
-        client, args.algorithm, args.platform, refresh=args.refresh,
-        on_progress=None if args.quiet else _download_reporter(args.algorithm),
+        client, args.algorithm, args.platform, refresh=refresh,
+        on_progress=None if quiet else _download_reporter(args.algorithm),
     )
+
+
+def _load_disk(package: str, slug: str, *, published: bool):
+    """Load a model that is a package on this disk, from wherever it came.
+
+    A published model is loaded through :func:`~siarapp.loader.load_unpacked` rather than
+    ``load_local`` for one reason: the manifest that was fetched with it sits beside the package,
+    and going through the tree is what puts its **version** in the run manifest. That is not
+    bookkeeping — a society republishes as its leaderboard moves, so "which build drew these
+    boxes" is a question about the output folder that only the version can answer.
+
+    Args:
+        package: The package directory.
+        slug: What to call the model.
+        published: Whether it came from an installation, and so has a manifest beside it.
+
+    Returns:
+        The loaded :class:`~siarapp.loader.AlgorithmHandle`.
+    """
+    if published:
+        return load_unpacked(os.path.dirname(package), slug, "any")
+    return load_local(package, slug)
+
+
+def _provenance(model) -> str:
+    """Where a model on this disk came from, in the few words a run line has room for."""
+    if model.published:
+        return f"published by {model.detail.get('owner') or 'another account'}"
+    if model.imported:
+        return "imported from " + str(model.detail.get("imported_from") or "another machine")
+    return "built here"
+
+
+def _published_match(client, slug: str) -> dict | None:
+    """The published model this name refers to, or ``None`` if it is not one.
+
+    Asked before a bundle is downloaded and answered from the account's own catalogue, so a
+    society somebody published and granted runs by name exactly as a bundle does. An install that
+    has no such endpoint, or a request that fails, is "not a published model" rather than a failed
+    run: the bundle path after this one is the older and more common answer, and it must not be
+    lost to a catalogue this account may have no rows in anyway.
+    """
+    from siarapp.published import choose_published
+
+    try:
+        rows = client.published_models()
+    except ApiError:
+        return None
+    return choose_published(rows, slug)
 
 
 def _download_reporter(slug: str):

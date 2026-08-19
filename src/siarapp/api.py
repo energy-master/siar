@@ -12,6 +12,11 @@ ones because a new customer has no token yet, the rest because a CLI has no brow
 * ``scanner_list.php`` — the published algorithm catalogue: slug, description, shapes, params,
   and which platform builds exist. Any active user sees everything the super has published.
 * ``scanner_get.php`` — one build's bundle, as a zip.
+* ``soc_model_list.php`` — the societies this *account* may run: what it published from its own
+  build box, everything on the installation if it is a super, and what a super has released and
+  granted to it otherwise. A different question from ``scanner_list.php``'s, which is about the
+  installation rather than the account, and so a different endpoint rather than a flag.
+* ``soc_model_get.php`` — one society's package, as a zip rooted at the importable directory.
 * ``scanner_feedback.php`` — post a rating for a build, or read back this account's own.
 
 Stdlib ``urllib`` rather than ``requests``, for the reason the PNG encoder is stdlib too: this
@@ -64,7 +69,7 @@ class AuthError(ApiError):
 
 
 class Client:
-    """A thin client over the three endpoints the CLI needs.
+    """A thin client over the endpoints the CLI needs.
 
     Args:
         base_url: The install, e.g. ``"https://goident.ai"``. A trailing slash is fine.
@@ -267,6 +272,64 @@ class Client:
             f"/api/idapi/scanner_get.php?{query}", raw=True, on_progress=on_progress
         )
 
+    def published_models(self) -> list[dict]:
+        """The societies this account may download — models other people bred with siar-build.
+
+        Not a variant of :meth:`algorithms`. That catalogue is the installation's: obfuscated
+        bundles, published once, offered to everybody who can sign in. These are packages an
+        account uploaded from its own build box, and who may run one is a per-account grant — so
+        two people signed in to the same install see different lists, and a model missing from
+        this one is a grant nobody has made rather than a fault.
+
+        Each row carries ``slug``, ``owner``, ``access`` (``"owner"``, ``"super"`` or
+        ``"granted"``), ``published``, ``target``, ``title``, ``description``, ``version``,
+        ``vote``, ``expects``, ``unseen``, ``bytes``, ``sha256`` and the package's own
+        ``manifest``.
+
+        Returns:
+            The rows, newest build first, as the server sent them.
+        """
+        res = self._request("/api/idapi/soc_model_list.php")
+        rows = res.get("models") if isinstance(res, dict) else None
+        return rows if isinstance(rows, list) else []
+
+    def published_bundle(
+        self,
+        slug: str = "",
+        *,
+        model_id: int = 0,
+        owner: str = "",
+        on_progress: Callable[[int, int | None], None] | None = None,
+    ) -> bytes:
+        """Download one published society's package zip.
+
+        Args:
+            slug: The society's name. Resolved against what this account may run, its own
+                uploads first.
+            model_id: The row id from :meth:`published_models`, which names one society exactly.
+                Preferred where it is known: a society is identified by (owner, name), and two
+                boxes can breed the same target and call it the same thing.
+            owner: Narrow a slug to one account's upload.
+            on_progress: Called as ``(bytes_so_far, total_or_None)`` as the zip arrives.
+
+        Returns:
+            The zip bytes, rooted at the importable package directory.
+
+        Raises:
+            ApiError: If there is no such society, or none this account may run — the server
+                answers the two the same way on purpose.
+        """
+        fields: dict[str, str | int] = {}
+        if model_id:
+            fields["id"] = int(model_id)
+        else:
+            fields["slug"] = slug
+            if owner:
+                fields["owner"] = owner
+        query = urllib.parse.urlencode(fields)
+        return self._request(
+            f"/api/idapi/soc_model_get.php?{query}", raw=True, on_progress=on_progress
+        )
 
     def send_feedback(self, slug: str, score: int, *, version: str = "",
                       comment: str = "", platform: str = "") -> dict:

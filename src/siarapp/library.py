@@ -1,17 +1,19 @@
 # Vixen Intelligence c.2026
 """One index of everything this machine can actually run.
 
-Three things arrive by completely different routes and end up doing the same job. A
+Four things arrive by completely different routes and end up doing the same job. A
 **downloaded** model is a PyArmor bundle pulled from IDent Dynamics and unpacked under
 ``~/.siar-app/algorithms``; a **built** model is one the operator evolved themselves with
 ``siar-build``, which leaves a plain Python package on disk and a row about it in its own index at
 ``~/.siar-build/models.db``; an **imported** model is one built on another machine and carried
 here as a bundle by :mod:`siarapp.transfer`, which unpacks it under ``~/.siar-app/models`` with
-the build row that travelled with it. All three are handed to :func:`siarapp.runner.run_folder`
+the build row that travelled with it; a **published** model is one somebody else bred and
+published to the installation, fetched by :mod:`siarapp.published` into ``~/.siar-app/published``
+because this account was granted it. All four are handed to :func:`siarapp.runner.run_folder`
 and none of them knows about the others.
 
 Which is exactly why they should be listed together. The question in front of somebody with a
-folder of recordings is "what can I run over this", and answering it out of two commands and one
+folder of recordings is "what can I run over this", and answering it out of three commands and one
 sibling tool's database is how a model that took an afternoon to build gets forgotten about.
 :func:`library` answers it once.
 
@@ -22,8 +24,10 @@ newer or older schema is a missing field rather than an exception, and any failu
 "nothing built here" — a listing, not an error. Deleting ``models.db`` costs a listing and no
 models, and this module must behave the same way about it.
 
-Nothing here loads an algorithm, imports a bundle or touches the network. It reads manifests and
-one SQLite file, so a library screen opens instantly on a vessel with no link.
+Nothing here loads an algorithm, imports a bundle or touches the network — a published model is
+listed from what was written beside it when it was fetched, never by asking the installation who
+it belongs to now. It reads manifests and one SQLite file, so a library screen opens instantly on
+a vessel with no link.
 """
 from __future__ import annotations
 
@@ -33,10 +37,12 @@ import sqlite3
 from datetime import datetime
 
 from siarapp.loader import installed_algorithms
+from siarapp.published import installed_published
 from siarapp.transfer import installed_bundles
 
 __all__ = [
     "BUILD_HOME_ENV",
+    "PUBLISHED",
     "Model",
     "Program",
     "build_db_path",
@@ -47,6 +53,7 @@ __all__ = [
     "imported_models",
     "library",
     "local_model",
+    "published_models",
     "society_models",
 ]
 
@@ -69,8 +76,14 @@ DOWNLOADED = "downloaded"
 BUILT = "built"
 IMPORTED = "imported"
 
+#: A model somebody else bred and published to the installation, which this account was granted
+#: and this machine has fetched. Its own kind rather than a downloaded one, because what can be
+#: re-fetched depends on a grant somebody else can withdraw, and because — unlike a bundle — it is
+#: a readable package whose members can be shown.
+PUBLISHED = "published"
+
 #: A **society**: many bots for one target, voting. siar-build breeds these continuously and
-#: republishes as its leaderboard moves, so unlike the other three what this slug names is not a
+#: republishes as its leaderboard moves, so unlike the others what this slug names is not a
 #: fixed program — it is whichever twenty bots were best when it last published. Listed as its own
 #: kind rather than as a build because it *is* a different thing to reason about: a downloaded
 #: bundle can be re-fetched, a built model is one search's answer, and a society is a population
@@ -78,9 +91,19 @@ IMPORTED = "imported"
 SOCIETY = "society"
 
 #: The sources whose models are a package on this disk, loaded with
-#: :func:`siarapp.loader.load_local` rather than fetched. Built here or carried here — from the
-#: loader's point of view those are the same thing, and only these two can be exported.
-LOCAL_SOURCES = (BUILT, IMPORTED, SOCIETY)
+#: :func:`siarapp.loader.load_local` rather than imported out of an obfuscated bundle. Built here,
+#: carried here or fetched here — from the loader's point of view those are the same thing.
+LOCAL_SOURCES = (BUILT, IMPORTED, SOCIETY, PUBLISHED)
+
+#: The sources a model may be exported from. Deliberately not :data:`LOCAL_SOURCES`: a published
+#: model is a readable package like the rest, but it is somebody else's, handed to this account by
+#: a grant. Passing it on as a file would be this machine deciding who else may run it.
+PORTABLE_SOURCES = (BUILT, IMPORTED, SOCIETY)
+
+#: The family every siar-build society package declares. What tells a fetched model that it is a
+#: society — many bots voting — rather than one program, since the row that says so is on the
+#: installation and the manifest is what travelled.
+SOCIETY_FAMILY = "brahma_society"
 
 
 class Program:
@@ -145,7 +168,8 @@ class Model:
     """One thing this machine can run, whichever way it got here.
 
     Attributes:
-        source: :data:`DOWNLOADED`, :data:`BUILT`, :data:`IMPORTED` or :data:`SOCIETY`.
+        source: :data:`DOWNLOADED`, :data:`BUILT`, :data:`IMPORTED`, :data:`SOCIETY` or
+            :data:`PUBLISHED`.
         slug: What the model is called — the name a sidecar files its boxes under.
         title: A human title where one is recorded, else ``""``.
         version: The bundle's version, or the siar-build that produced the model.
@@ -192,6 +216,27 @@ class Model:
         return self.source == IMPORTED
 
     @property
+    def published(self) -> bool:
+        """Whether this model was published to the installation by another account.
+
+        The question the panel asks before any other, because it changes who the model belongs
+        to: everything else in the library is this machine's, and this is somebody else's, held
+        here for as long as the grant behind it stands.
+        """
+        return self.source == PUBLISHED
+
+    @property
+    def portable(self) -> bool:
+        """Whether this model may be written to a file and carried to another machine.
+
+        Not the same question as :attr:`local`, and the difference is not about the files. A
+        downloaded bundle is licensed per machine; a published model was handed to this account
+        by a grant, and exporting one would be this machine deciding who else may run it. Both
+        are refused by :func:`siarapp.transfer.export_model`, which says which of the two it is.
+        """
+        return self.source in PORTABLE_SOURCES
+
+    @property
     def society(self) -> bool:
         """Whether this is a society of bots voting rather than one program.
 
@@ -199,8 +244,15 @@ class Model:
         built model is one search's answer and will say the same thing next month, and a society
         republishes as its leaderboard moves. Two scans of one folder a week apart under one
         society name are not necessarily two runs of the same detector.
+
+        Asked of what the model *is* rather than of how it got here, so a society fetched from an
+        installation answers the same as one bred on this machine: it is the same package, with
+        the same members and the same moving leaderboard behind it.
         """
-        return self.source == SOCIETY
+        return self.source == SOCIETY or (
+            self.source == PUBLISHED
+            and str(self.detail.get("family") or "") == SOCIETY_FAMILY
+        )
 
     @property
     def local(self) -> bool:
@@ -664,6 +716,54 @@ def imported_models() -> list[Model]:
     return models
 
 
+def published_models() -> list[Model]:
+    """The models published to the installation that this machine has fetched, newest first.
+
+    Read from this package's own cache rather than from the installation, so the listing is the
+    same on a vessel with no link as it is in the office: what is on this disk is what can be run,
+    and whether the account is *still* granted a model is a question only a fetch can answer.
+
+    The row says whose model it is and whether it has been released, because both are facts about
+    somebody else's decision that this machine cannot change. An unreleased model in this list is
+    not an error — it is the publisher's own upload, or a super's, and being able to run one
+    before it goes out is the whole reason publishing from the build box is worth doing.
+
+    Returns:
+        One :class:`Model` per cached model.
+    """
+    models = []
+    for row in installed_published():
+        catalogue = dict(row.get("catalogue") or {})
+        manifest = catalogue.pop("manifest", None)
+        shapes = manifest.get("shapes") if isinstance(manifest, dict) else None
+        vote = catalogue.get("vote") if isinstance(catalogue.get("vote"), dict) else {}
+        detail = dict(catalogue)
+        detail["fetched_at"] = row.get("fetched_at") or 0
+        detail["install"] = row.get("base_url") or ""
+        if isinstance(shapes, list) and shapes:
+            detail["shapes"] = [str(shape) for shape in shapes]
+        if vote.get("n"):
+            detail["votes"] = f"{int(vote.get('k') or 0)} of {int(vote['n'])}"
+        runnable = bool(row.get("runnable"))
+        models.append(Model(
+            source=PUBLISHED,
+            slug=str(row.get("slug") or "model"),
+            title=str(row.get("title") or ""),
+            version=str(row.get("version") or ""),
+            platform="source",
+            path=str(row.get("path") or ""),
+            size_bytes=int(row.get("bytes") or 0),
+            stamped_at=int(row.get("fetched_at") or 0),
+            runnable=runnable,
+            note="" if runnable else
+                 "the package is missing from this download — fetch it again with "
+                 f"`siar-app published --get {row.get('slug') or ''}`",
+            detail=detail,
+            programs=[_program_from(p) for p in row.get("programs") or []],
+        ))
+    return models
+
+
 def _program_from(row: dict) -> Program:
     """One program out of a bundle's manifest, ignoring fields this version does not know."""
     if not isinstance(row, dict):
@@ -688,30 +788,35 @@ def local_model(slug: str, *, db_path: str | None = None) -> Model | None:
         db_path: siar-build's index, for a test.
 
     Returns:
-        The most recent runnable match. Imported models come first — an import is the deliberate
-        act of the three — then societies, then single builds. A society and a build cannot in
-        practice collide, since siar-build names them differently, but the order is fixed rather
-        than incidental so that a name which somehow resolved two ways would resolve the same way
-        every time.
+        The most recent runnable match. Imported models come first — an import is the most
+        deliberate act of the four — then societies, then single builds, and a model published by
+        somebody else last. That order is what stops a cached copy of another account's model
+        shadowing one of this machine's own: two of them answering to one name is unlikely, and
+        the one to run is the one this bench made. The order is fixed rather than incidental so
+        that a name which somehow resolved two ways would resolve the same way every time.
     """
     wanted = str(slug or "").strip().lower()
     if not wanted:
         return None
-    candidates = [m for m in imported_models() + society_models(db_path) + built_models(db_path)
+    candidates = [m for m in (imported_models() + society_models(db_path)
+                              + built_models(db_path) + published_models())
                   if m.runnable and m.slug.lower() == wanted]
     return candidates[0] if candidates else None
 
 
 def library(*, db_path: str | None = None) -> list[Model]:
-    """Everything runnable on this machine: downloaded, built here, then carried here.
+    """Everything runnable on this machine, grouped by how it got here.
 
     Grouped rather than interleaved by date. They are different kinds of thing — one can be
-    fetched again from the server, one is a population still being bred, one is a single search's
-    answer, and one is here because somebody carried it — and a list that sorted them together
-    would make that difference invisible at exactly the moment somebody is choosing between them.
+    fetched again from the server, one belongs to another account and is here on a grant, one is a
+    population still being bred, one is a single search's answer, and one is here because somebody
+    carried it — and a list that sorted them together would make that difference invisible at
+    exactly the moment somebody is choosing between them.
 
-    Societies come before builds because a society *is* the best of many builds, so a machine
-    running one has its answer at the top rather than under forty rounds of its own workings.
+    The two that came off the network lead, because "what did I fetch" is one question and asked
+    together. Societies come before builds because a society *is* the best of many builds, so a
+    machine running one has its answer at the top rather than under forty rounds of its own
+    workings.
 
     Args:
         db_path: siar-build's index, for a test or a non-standard workspace.
@@ -719,8 +824,8 @@ def library(*, db_path: str | None = None) -> list[Model]:
     Returns:
         The models, downloaded first, each group newest first.
     """
-    return (downloaded_models() + society_models(db_path) + built_models(db_path)
-            + imported_models())
+    return (downloaded_models() + published_models() + society_models(db_path)
+            + built_models(db_path) + imported_models())
 
 
 #: What a model whose target nothing on this machine knows is filed under. A word rather than a

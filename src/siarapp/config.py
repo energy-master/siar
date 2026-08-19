@@ -1,14 +1,16 @@
 # Vixen Intelligence c.2026
-"""The workspace at ``~/.siar-app`` — credentials, the algorithm cache, run history.
+"""The workspace at ``~/.siar-app`` — credentials, the model caches, run history.
 
-One directory, three things in it, and a clear rule about which of them may be deleted: all of
-them. Credentials cost a re-login, the cache costs a re-download, the history is a convenience.
-Nothing here is the product of a scan — that goes in the output folder the user names.
+One directory, four things in it, and a clear rule about which of them may be deleted: all of
+them. Credentials cost a re-login, either cache costs a re-download, the history is a
+convenience. Nothing here is the product of a scan — that goes in the output folder the user
+names.
 
 ```
 ~/.siar-app/
   credentials.json           the bearer token, mode 0600
   algorithms/<slug>/<platform>/   unpacked bundles, one tree per build
+  published/<owner>/<slug>/  societies published to the install by another account
   runs.json                  the last RUN_HISTORY_MAX runs, for `siar-app runs`
 ```
 
@@ -35,6 +37,7 @@ __all__ = [
     "libc_flavour",
     "load_credentials",
     "platform_compatible",
+    "published_dir",
     "python_supported",
     "read_json",
     "recent_cost",
@@ -117,6 +120,35 @@ def imported_dir() -> str:
         ``$SIAR_APP_HOME/models``, absolute.
     """
     path = os.path.join(home(), "models")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def published_dir(owner: str = "", slug: str = "") -> str:
+    """Where a model published to the install by another account is cached. Created if absent.
+
+    A third directory rather than a corner of one of the other two, because what may be deleted
+    differs. ``algorithms/`` is a cache of what this installation publishes to everybody and can
+    always be fetched again; ``models/`` holds imports, which exist nowhere but the machines
+    somebody carried them to. This one is a cache like the first — the install still has the
+    package — but of something granted per account, so what comes back on a re-fetch depends on
+    an account still being entitled to it.
+
+    Args:
+        owner: The account that published the model. Empty for the root of the cache.
+        slug: The model's name under that account. Empty for the owner's directory.
+
+    Returns:
+        ``$SIAR_APP_HOME/published[/<owner>[/<slug>]]``, absolute. Keyed by owner as well as name
+        because two accounts can breed the same target and call it the same thing, and a cache
+        that collided on the name would serve one of them under the other's.
+    """
+    parts = [home(), "published"]
+    if owner:
+        parts.append(_safe(owner))
+        if slug:
+            parts.append(_safe(slug))
+    path = os.path.join(*parts)
     os.makedirs(path, exist_ok=True)
     return path
 

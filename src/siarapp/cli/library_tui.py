@@ -70,7 +70,7 @@ from siarapp.config import recent_cost, run_history
 from siarapp.grid import ScannerError
 from siarapp.io.audio import count_recordings, find_recordings, is_audio, probe
 from siarapp.library import Model, feature_usage, library, targets
-from siarapp.loader import load_cached, load_local
+from siarapp.loader import load_cached, load_local, load_unpacked
 from siarapp.runner import DEFAULT_MAX_BYTES, RunOptions
 from siarapp.transfer import (
     BUNDLE_SUFFIX,
@@ -849,6 +849,8 @@ class Library:
                 f"{model.slug} is "
                 + ("a downloaded bundle — its name is the server's"
                    if not model.local else
+                   f"published by {model.detail.get('owner') or 'another account'} — its name is "
+                   f"theirs" if model.published else
                    f"a model built here; rename it where it lives: "
                    f"`siar-build name {model.detail.get('id', '<id>')} <new name>`"),
                 "warn")
@@ -967,17 +969,21 @@ def _number(value, spec: str = ".3f", missing: str = "—") -> str:
 def _where_from(model: Model) -> str:
     """The TYPE cell: what kind of thing this is, which is also how it got here.
 
-    Four kinds, and the distinction is not cosmetic. A **downloaded** bundle can be fetched again;
+    Five kinds, and the distinction is not cosmetic. A **downloaded** bundle can be fetched again;
     an **imported** one exists nowhere but this disk and the machine it was carried from, so it
     names that machine rather than saying "imported", which on a vessel with four of them is the
     only part anybody needs. A **built** model is one search's answer and will say the same thing
-    next month.
+    next month. A **published** one belongs to another account and names it, because everything
+    else in this list is this machine's and that one is held here on somebody's grant.
 
     A **society** is the one that behaves differently: it is many bots voting, and siar-build
     republishes it as its leaderboard moves. Two scans of one folder a week apart under one
     society name are not necessarily two runs of the same detector, and the column is where a
     reader finds that out.
     """
+    if model.published:
+        owner = str(model.detail.get("owner") or "")
+        return f"by {owner}" if owner else "published"
     if model.society:
         return "society"
     if model.imported:
@@ -1067,6 +1073,11 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
     if not model.runnable:
         lines.append(paint(f"  cannot run here: {model.note}", YELLOW))
 
+    # Asked before "is it a society", because a published society is described by what the
+    # installation knows about it — who published it, whether it has been released, what it scored
+    # on audio nothing selected on — and not by siar-build's row, which is on somebody else's box.
+    if model.published:
+        return lines + _published_detail(model, width)
     if model.society:
         return lines + _society_detail(model, width)
 
@@ -1114,6 +1125,51 @@ def _model_detail(model: Model | None, models: list[Model], width: int) -> list[
     if detail.get("stopped_at"):
         lines.append(paint(f"  stopped at {detail['stopped_at']} — {detail.get('reason') or ''}",
                            YELLOW))
+    return lines
+
+
+def _published_detail(model: Model, width: int) -> list[str]:
+    """A model published to the installation by somebody else, in the terms that make it theirs.
+
+    What a build row would say is not available here and inventing it would be worse than the
+    blank: the search that produced this happened on another machine. What IS knowable is
+    everything the installation was told — who published it, whether they have released it, what
+    it scored on audio nothing selected on, the grid it demands — and the one fact this machine
+    contributes, which is when it last fetched a copy. A society republishes as its leaderboard
+    moves, so that date is not bookkeeping: it says which build these members are.
+    """
+    detail = model.detail
+    expects = detail.get("expects") if isinstance(detail.get("expects"), dict) else {}
+    unseen = detail.get("unseen") if isinstance(detail.get("unseen"), dict) else {}
+    rate = expects.get("sample_rate") or expects.get("sampleRate")
+    audio = ("grid not recorded" if not rate else
+             f"{rate} Hz · fft {expects.get('fft')} · hop {expects.get('hop')} · "
+             f"{expects.get('window') or 'hann'}")
+    access = {"owner": "you published it", "super": "yours to see as a super",
+              "granted": "granted to this account"}.get(str(detail.get("access") or ""), "")
+    release = ("released" if detail.get("published")
+               else paint("not released — nobody else has it yet", YELLOW))
+
+    lines = [
+        f"  target {detail.get('target') or model.slug}"
+        + paint(f"   published by {detail.get('owner') or 'another account'}"
+                + (f" · {access}" if access else ""), DIM),
+        f"  status {release}" + paint(f"   {detail.get('install') or 'this install'}", DIM),
+    ]
+    if detail.get("votes"):
+        lines.append(f"  votes  {detail['votes']} members must agree"
+                     + paint("   before it draws a box", DIM))
+    if unseen.get("roc_auc") is not None:
+        lines.append(f"  result held-out {_number(unseen.get('roc_auc'))}"
+                     + paint(" — on audio nothing selected on, as its publisher measured it",
+                             DIM))
+    if detail.get("description"):
+        lines.append(paint(f"  about  {fit(str(detail['description']), max(20, width - 10))}",
+                           DIM))
+    lines += [
+        f"  audio  {audio}",
+        paint(f"  fetched {stamp(model.stamped_at)} · package {model.path}", DIM),
+    ]
     return lines
 
 
@@ -1278,6 +1334,7 @@ def _title(lib: Library, width: int) -> str:
     downloaded = sum(1 for m in lib.all_models if not m.local)
     built = sum(1 for m in lib.all_models if m.built)
     imported = sum(1 for m in lib.all_models if m.imported)
+    published = sum(1 for m in lib.all_models if m.published)
     societies = sum(1 for m in lib.all_models if m.society)
     bots = sum(len(m.programs) for m in lib.all_models)
     features = len(feature_usage(lib.all_models))
@@ -1289,6 +1346,7 @@ def _title(lib: Library, width: int) -> str:
               # Named only when there are any: on the machine models are built on, which is most
               # of them, a permanent "0 imported" would be a column about nothing.
               + (f"{imported} imported · " if imported else "")
+              + (f"{published} published to you · " if published else "")
               + f"{bots} bot{'' if bots == 1 else 's'} · "
               f"{features} feature{'' if features == 1 else 's'}")
     return fit(f"{paint('siar-app', BOLD)}  library{paint('   ' + counts, DIM)}", width)
@@ -1582,6 +1640,10 @@ def _load_algorithm(model: Model):
     Raises:
         ScannerError: If the bundle or package will not import, or is no longer on disk.
     """
+    if model.published:
+        # Through the tree rather than straight at the package: the manifest fetched with it sits
+        # beside the package, and it is what carries the build's version into the run manifest.
+        return load_unpacked(os.path.dirname(model.path), model.slug, "any")
     if model.local:
         return load_local(model.path, model.slug)
     handle = load_cached(model.slug, model.platform)

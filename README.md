@@ -114,7 +114,7 @@ RUN
  ↑↓ select  tab pane  enter run  i/o/p rows  n rename  e/m export/import  R reload  q quit
 ```
 
-Three kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches
+Four kinds of model, one list. The **downloaded** ones are the bundles `siar-app run` fetches
 from IDent Dynamics. The ones **built here** are yours, from
 [`siar-build`](https://github.com/energy-master/siar-build) — read straight out of its own index
 at `~/.siar-build/models.db`, so a model you evolved last week is in the list the moment it is
@@ -122,7 +122,10 @@ packaged, with the **bots** it came out of (the champion and the runners-up of t
 each of them **reads**, and the run they came from. Nothing is copied and nothing is written back;
 delete that database and you lose a listing, not a model. The ones **from another machine** were
 built somewhere else and carried here as one file — `e` exports the selected model, `m` imports
-one, and [moving a model](#7-move-a-model-to-another-machine) is a section of its own below.
+one, and [moving a model](#7-move-a-model-to-another-machine) is a section of its own below. The
+ones **published by** somebody are theirs: bred on their box, uploaded to your install with
+`siar-build soc publish`, and here because your account was granted them — see
+[`siar-app published`](#siar-app-published).
 
 A downloaded bundle has no bots to show, and says so. What is inside it is licensed separately and
 stays inside it — that split is the whole design, and the library does not pretend otherwise.
@@ -262,6 +265,11 @@ fmax          number  null     High edge; null means up to Nyquist.
 **"RUNS HERE" says no?** An obfuscated bundle is pinned to an operating system, a CPU
 architecture and a Python minor version. `siar-app version` prints the tag your machine
 reports; ask whoever publishes the algorithms for a build with that tag.
+
+`siar-app algorithms` is the installation's catalogue. Models somebody bred themselves with
+[`siar-build`](https://github.com/energy-master/siar-build) and published here are granted per
+account and listed by [`siar-app published`](#siar-app-published) — worth a look, since the model
+for your survey may well be one somebody on your team bred rather than one we shipped.
 
 ## 3. Look at the folder before you scan it
 
@@ -688,7 +696,8 @@ invalid JSON. `$SIAR_APP_NO_BANNER` turns it off for a script that logs stderr.
 ### `siar-app lib`
 
 The library, described in full [above](#the-library--siar-app-with-no-command): every model on
-this machine — downloaded bundles and anything `siar-build` has packaged here — the bots and
+this machine — downloaded bundles, models published to your account, and anything `siar-build`
+has packaged here — the bots and
 features behind each one, and a form that scans a folder or a single recording with it. `library`
 is accepted as an alias, and bare `siar-app` opens the same screen.
 
@@ -883,6 +892,49 @@ the catalogue, which happens to whoever publishes them — or `not offered`, mea
 has been withdrawn or your account can no longer see it. Nothing will replace what is cached
 either way; the cache is yours until you refresh it. A `--check` that cannot reach the server
 prints a warning and still gives you the local answer.
+
+### `siar-app published`
+
+The models **other people** published to your install and your account may run. A different
+catalogue from [`algorithms`](#siar-app-algorithms), and deliberately a different command: that
+one is the installation's — obfuscated bundles, published once, offered to everybody who can sign
+in — while these are packages somebody bred with
+[`siar-build`](https://github.com/energy-master/siar-build) on their own machine and uploaded with
+`siar-build soc publish`. Who may run one is decided per account, so this list is *yours*: two
+people signed in to the same install see different rows.
+
+```bash
+$ siar-app published
+NAME                    FINDS     PUBLISHED BY  WHY YOU              VOTE  HELD-OUT      SIZE  HERE
+----------------------  --------  ------------  ----------------  -------  --------  --------  ----
+socmodel_recall_83vy3g  recall    rahul         granted           6 of 20     0.914  81.1 KiB  yes
+socmodel_hp_6yn6zy *    porpoise  you           you published it  11 of 20     0.887  83.4 KiB  no
+```
+
+| Flag | Meaning |
+|---|---|
+| `--get NAME` | download one now, so it is here before you go somewhere with no link |
+| `--owner USER` | whose upload, when two accounts published the same name |
+| `--refresh` | fetch again even if it is here — a society republishes as it improves |
+| `--remove NAME` | delete one from this machine (it can be fetched again) |
+| `--json` | the raw catalogue, with a `cached` flag per row |
+| `--server URL` | check a different install |
+
+**Three ways a model reaches this list.** You **published it** yourself, which needs no release —
+that is the whole reason to publish from the build box, so you can try it against real recordings
+first. You are a **super**, and see every society on the install. Or it was **granted** to you,
+which additionally needs the model to have been released. A `*` marks one that is not released:
+nobody else has it yet.
+
+You do not have to fetch anything by hand — `siar-app run -a <name>` pulls a published model the
+first time you ask for it, exactly as it does a bundle. `--get` is for the case where you know you
+are about to lose the link.
+
+A fetched model is a plain Python package: it runs wherever siar-app does, there is no build tag
+to match, and `siar-app lib` shows its members and what each of them reads. It **cannot be
+exported** — it is here on somebody else's grant, and a `.siarmodel` written out of it would hand
+it to an account that was never given it. On the other machine, sign in and
+`siar-app run -a <name>` there.
 
 ### `siar-app export NAME`
 

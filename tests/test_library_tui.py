@@ -786,3 +786,59 @@ def test_a_society_that_cannot_run_is_refused_with_its_reason():
                       form=tui.Form(input="/audio", out="/out"))
     lib.cursor = 0
     assert lib.form.blocking(lib.model()) != ""
+
+
+def _published(slug="socmodel_recall_83vy3g", owner="rahul", released=True):
+    """A society somebody else published to the install, fetched onto this machine."""
+    return Model(source="published", slug=slug, title="Sonar recall — society of 20",
+                 version="0.1.0+83vy3g", platform="source",
+                 path="/cache/published/" + owner + "/" + slug + "/siar_" + slug,
+                 size_bytes=83_000, stamped_at=1_700_000_300, runnable=True,
+                 detail={"owner": owner, "access": "granted", "published": released,
+                         "target": "recall", "family": "brahma_society",
+                         "description": "Fires where 6 of 20 metrics agree.",
+                         "install": "https://goident.ai", "votes": "6 of 20",
+                         "shapes": ["recall"], "unseen": {"roc_auc": 0.914},
+                         "expects": {"fft": 32768, "hop": 8192, "window": "hann",
+                                     "sample_rate": 96000}},
+                 programs=[_program()])
+
+
+def test_a_published_model_names_the_account_it_belongs_to(colour):
+    """Everything else in this list is this machine's. This one is held here on somebody's grant,
+    and the TYPE column is where a reader finds that out."""
+    lib = tui.Library(models=[_published(), _built()], runs=[],
+                      form=tui.Form(input="/audio", out="/out"))
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "by rahul" in frame
+    assert "1 published to you" in frame
+
+
+def test_selecting_a_published_model_describes_what_the_install_knows(colour):
+    """A build row would say what corpus it came off; that happened on another machine. What is
+    knowable is what its publisher told the install, and it is said instead of guessed."""
+    lib = tui.Library(models=[_published()], runs=[], form=tui.Form(input="/audio", out="/out"))
+    lib.cursor = 0
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "SOCIETY — socmodel_recall_83vy3g" in frame
+    assert "published by rahul" in frame
+    assert "6 of 20 members must agree" in frame
+    assert "0.914" in frame
+    assert "96000 Hz" in frame
+
+
+def test_an_unreleased_published_model_says_nobody_else_has_it(colour):
+    lib = tui.Library(models=[_published(released=False)], runs=[],
+                      form=tui.Form(input="/audio", out="/out"))
+    lib.cursor = 0
+    frame = "\n".join(tui.render(lib, 160, 44))
+    assert "not released" in frame
+
+
+def test_a_published_model_runs_exactly_as_a_built_one_does():
+    """It is a plain package on this disk, so ``Model.local`` decides it and nothing else does."""
+    lib = tui.Library(models=[_published(), _built()], runs=[],
+                      form=tui.Form(input="/audio", out="/out"))
+    published, built = lib.models[0], lib.models[1]
+    assert published.local and published.runnable and not published.portable
+    assert lib.form.blocking(published) == lib.form.blocking(built)
