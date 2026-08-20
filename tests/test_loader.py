@@ -89,14 +89,29 @@ def test_matching_is_exact_but_case_insensitive():
 
 
 def test_python_only_mismatch_names_the_fix():
-    """The common case, and the one the user can fix themselves in one command."""
-    message = _mismatch_message("all_structures", "linux-x86_64-cp314")
+    """The common case, and the one the user can fix themselves in one command.
+
+    The bundle tag is built from this machine's own with only the Python axis moved. Hardcoding
+    ``linux-x86_64`` made this a Linux test: on a macOS build box that tag differs on all three
+    axes, so the message took the publisher branch and the assertion failed for a reason that had
+    nothing to do with what is being tested.
+    """
+    os_arch, _, local_py = default_platform_tag().rpartition("-")
+    message = _mismatch_message("all_structures", f"{os_arch}-cp314")
     assert "uv tool install" in message
-    assert "3.14" in message and "3.13" in message
+    assert "3.14" in message and _py_version(local_py) in message
 
 
 def test_os_mismatch_asks_the_publisher_and_never_says_macos():
-    message = _mismatch_message("all_structures", "darwin-arm64-cp313")
+    """An OS that is not this one, whichever machine runs the suite.
+
+    ``darwin`` was written here when Linux was the only place this was built. On a Mac it names
+    the host, every axis agrees, and the assertions pass without the OS branch ever being reached
+    — a test that cannot fail on the platform it is about.
+    """
+    local = default_platform_tag()
+    other = "windows-x86_64-cp313" if local.startswith("darwin") else "darwin-arm64-cp313"
+    message = _mismatch_message("all_structures", other)
     assert "macos" not in message
     assert "publisher" in message
 
