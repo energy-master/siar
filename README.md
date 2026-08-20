@@ -16,55 +16,14 @@ Detections / Structures are **two-dimensional**: 1. a start and end time *and*  
 result is "a down-sweep from 3.2 to 2.1 kHz between 4.0 and 4.6 seconds", not just "something
 happened around 4 seconds".
 
-## Install
 
-```bash
-uv tool install --python 3.13 git+https://github.com/energy-master/siar.git
-```
-
-Runs on your CPU. Pulls in numpy and soundfile, and nothing else.
-
-**Use `uv`, and let it choose the Python.** The algorithms are downloaded as prebuilt
-bundles tied to CPython **3.13 exactly**. `uv tool install` fetches a
-private 3.13 for this tool and keeps it isolated, so the CLI works whatever Python your system
-happens to have and whatever you upgrade to later. Installing with `pip` under the wrong
-interpreter produces a CLI that runs, signs in, and then finds no algorithm it can load.
-
-If you do not have `uv`:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh      # macOS / Linux
-```
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
-```
-
-To upgrade later: `uv tool upgrade siar-app`.
-
-<details>
-<summary>Installing with pip instead</summary>
-
-Works, but the 3.13 is then your responsibility:
-
-```bash
-python3.13 -m pip install git+https://github.com/energy-master/siar.git
-```
-
-`pip` will refuse any other version — `requires-python` is pinned to `>=3.13,<3.14` precisely so
-that this fails at install time rather than at the first scan.
-
-</details>
-
+## Quick start
 The first command you run shows the MIT licence and asks you to accept it. See
 [Licence](#licence). Run the commands below to get started.
 
 ```bash
-siar-app quick-start      # the illustrated walkthrough, sixteen steps
 siar-app readme           # this manual
 ```
-
-## Quick start
 
 Three commands. Sign in, see what you can run, run it.
 
