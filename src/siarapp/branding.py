@@ -29,7 +29,7 @@ __all__ = [
 PRODUCT = "SIaR"
 
 #: What the initials stand for. Spelled out because nobody guesses it.
-TAGLINE = "Signal Information and Reconnaissance"
+TAGLINE = "Signal Intelligence and Reconnaissance"
 
 #: Where the app it talks to lives.
 HOME_URL = "goident.ai"

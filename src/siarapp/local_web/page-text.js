@@ -20,7 +20,7 @@
 
 window.QUICKSTART_TEXT = `
 
-eyebrow: SIaR · Signal Information and Reconnaissance
+eyebrow: SIaR · Signal Intelligence and Reconnaissance
 headline: Build datasets from your data. 
 intro: Sixteen steps with ~siar-app~ — the command line that runs the IDent Dynamics structure scanners over a folder of recordings and writes an output folder you drag straight into the web app.
 prompt: user@vi:~$

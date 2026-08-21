@@ -1,7 +1,7 @@
 # siar-app
 ## One library for edge and high performance computing
 
-**SIaR — Signal Information and Reconnaissance.** 
+**SIaR — Signal Intelligence and Reconnaissance.** 
 
 Run our models locally against your dataset securely and offline. SIaR allows you to point our model(s) against your dataset and build resulting datasets in your own secure and offline environment. Download the models you wish to use and run them. All output can be viewed by dropping your output folder into IDent dynamics at [goident.ai] or view locally in our slimmed down version of the viewer.
 
@@ -644,7 +644,7 @@ terminal, prints the help and exits 0.
 Every command prints a two-line banner first:
 
 ```
-SIaR · Signal Information and Reconnaissance · goident.ai
+SIaR · Signal Intelligence and Reconnaissance · goident.ai
 siar-app 0.7.0 · © Vixen Intelligence 2026
 ```
 
@@ -1262,6 +1262,6 @@ installation you sign in to.
 
 ---
 
-SIaR — Signal Information and Reconnaissance · [goident.ai](https://goident.ai), [vixenintelligence.com](https://www.vixenintelligence.com)
+SIaR — Signal Intelligence and Reconnaissance · [goident.ai](https://goident.ai), [vixenintelligence.com](https://www.vixenintelligence.com)
 
 © Vixen Intelligence, 2026.
